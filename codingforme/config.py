@@ -46,7 +46,7 @@ def load_project_env(start, override=True):
     if env_path is None:
         return {}
     loaded = {}
-    for line in env_path.read_text(encoding="utf-8").splitlines():
+    for line in env_path.read_text(encoding="utf-8-sig").splitlines():
         parsed = _parse_env_line(line)
         if parsed is None:
             continue
