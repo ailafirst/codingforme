@@ -136,6 +136,42 @@ def test_context_manager_preserves_current_request_when_over_budget(tmp_path):
     assert metadata["current_request"]["rendered_chars"] == len(request)
 
 
+def test_context_manager_head_tail_clips_current_request_when_it_alone_overflows_budget(tmp_path):
+    agent = build_agent(tmp_path, [])
+
+    huge_request = "START-MARKER " + ("X" * 2000) + " END-MARKER"
+    prompt, metadata = ContextManager(
+        agent,
+        total_budget=250,
+        section_budgets={
+            "prefix": 60,
+            "memory": 60,
+            "relevant_memory": 60,
+            "history": 60,
+        },
+    ).build(huge_request)
+
+    assert len(prompt) <= 250
+    assert metadata["current_request"]["truncated"] is True
+    assert metadata["current_request"]["dropped_chars"] > 0
+    assert metadata["prompt_over_budget"] is False
+    rendered_request = prompt.split("Current user request:\n", 1)[1]
+    assert rendered_request.startswith("START-MARKER")
+    assert "END-MARKER" in rendered_request
+    assert "中间已省略" in rendered_request
+    assert "请提示用户缩短请求或分步描述" in rendered_request
+
+
+def test_context_manager_leaves_current_request_untruncated_when_it_fits(tmp_path):
+    agent = build_agent(tmp_path, [])
+
+    prompt, metadata = ContextManager(agent).build("a short request that fits easily")
+
+    assert metadata["current_request"]["truncated"] is False
+    assert metadata["current_request"]["dropped_chars"] == 0
+    assert prompt.rstrip().endswith("Current user request:\na short request that fits easily")
+
+
 def test_context_manager_collapses_older_duplicate_reads_into_one_summary_line(tmp_path):
     file_path = tmp_path / "sample.txt"
     file_path.write_text("alpha\nbeta\n", encoding="utf-8")

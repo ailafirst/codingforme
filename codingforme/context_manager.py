@@ -41,6 +41,27 @@ def _tail_clip(text, limit):
     return text[: limit - 3] + "..."
 
 
+def _head_tail_clip(text, limit):
+    """保留首尾、省略中间的裁剪——仅用于 current_request 兜底分支。
+
+    为什么不用 `_tail_clip`：用户请求的关键约束经常同时出现在开头(要做什么)
+    和结尾(边界条件、"不要动 xxx" 之类的补充说明)，只砍尾巴容易连着关键信息
+    一起丢掉。这里退而求其次，两头都留一点，只丢中间。
+    """
+    text = str(text)
+    if limit <= 0:
+        return ""
+    if len(text) <= limit:
+        return text
+    marker = "...[中间已省略]..."
+    if limit <= len(marker):
+        return text[:limit]
+    remaining = limit - len(marker)
+    head_len = remaining // 2
+    tail_len = remaining - head_len
+    return text[:head_len] + marker + text[len(text) - tail_len :]
+
+
 @dataclass
 class SectionRender:
     raw: str
@@ -170,6 +191,36 @@ class ContextManager:
             if not reduced:
                 break
 
+        # 兜底分支：只有当 current_request 自己就超过 total_budget、且其它
+        # section 已经全部压到 floor 仍不够时才会走到这里。正常情况下
+        # current_request 完全不受上面这个压缩循环影响——这里不是把它纳入
+        # 常规裁剪顺序，而是处理"怎么裁都裁不出空间"的极端情况：与其让一个
+        # 超预算的 prompt 原样发给模型、指望后端报错兜底，不如在这一步就把
+        # 决定权收回来，用可审计的方式砍它，并显式告诉模型这一情况。
+        current_request_truncated = False
+        current_request_dropped_chars = 0
+        if len(prompt) > self.total_budget:
+            current_render = rendered[CURRENT_REQUEST_SECTION]
+            header = "Current user request:\n"
+            note = (
+                "\n\n[注意：用户原始请求过长，已保留首尾并省略中间部分；"
+                "如果任务因此显得不完整，请提示用户缩短请求或分步描述。]"
+            )
+            other_chars = len(prompt) - len(current_render.rendered)
+            available = self.total_budget - other_chars - len(note) - len(header)
+            available_for_message = max(0, available)
+            if available_for_message < len(user_message):
+                current_request_truncated = True
+                clipped_message = _head_tail_clip(user_message, available_for_message)
+                current_request_dropped_chars = len(user_message) - len(clipped_message)
+                rendered[CURRENT_REQUEST_SECTION] = SectionRender(
+                    raw=current_render.raw,
+                    budget=0,
+                    rendered=header + clipped_message + note,
+                    details={"truncated": True},
+                )
+                prompt = self._assemble_prompt(rendered)
+
         metadata = self._metadata(
             prompt=prompt,
             rendered=rendered,
@@ -178,6 +229,8 @@ class ContextManager:
             selected_notes=selected_notes,
             user_message=user_message,
             section_texts=section_texts,
+            current_request_truncated=current_request_truncated,
+            current_request_dropped_chars=current_request_dropped_chars,
         )
         return prompt, metadata
 
@@ -453,7 +506,18 @@ class ContextManager:
             ]
         ).strip()
 
-    def _metadata(self, prompt, rendered, budgets, reduction_log, selected_notes, user_message, section_texts):
+    def _metadata(
+        self,
+        prompt,
+        rendered,
+        budgets,
+        reduction_log,
+        selected_notes,
+        user_message,
+        section_texts,
+        current_request_truncated=False,
+        current_request_dropped_chars=0,
+    ):
         section_metadata = {}
         for section in SECTION_ORDER[:-1]:
             section_metadata[section] = {
@@ -505,5 +569,7 @@ class ContextManager:
                 "raw_chars": len(user_message),
                 "rendered_chars": len(user_message),
                 "section_chars": len(rendered[CURRENT_REQUEST_SECTION].rendered),
+                "truncated": bool(current_request_truncated),
+                "dropped_chars": int(current_request_dropped_chars),
             },
         }
