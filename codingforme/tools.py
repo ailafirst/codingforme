@@ -50,14 +50,18 @@ DELEGATE_TOOL_SPEC = {
     "description": "Ask a bounded read-only child agent to investigate.",
 }
 
+# 参数校验失败时回给模型的示例。**只举参数对象，不举调用形式**：调用形式由
+# 标准 function-calling 接口决定，这里再示范一遍 <tool> 标签，等于在模型出错的
+# 那一刻把它推向一套 prompt 里根本没教、我们也没发 schema 的协议——协议互斥的
+# 问题曾经就是从这个通道漏出去的。
 TOOL_EXAMPLES = {
-    "list_files": '<tool>{"name":"list_files","args":{"path":"."}}</tool>',
-    "read_file": '<tool>{"name":"read_file","args":{"path":"README.md","start":1,"end":80}}</tool>',
-    "search": '<tool>{"name":"search","args":{"pattern":"binary_search","path":"."}}</tool>',
-    "run_shell": '<tool>{"name":"run_shell","args":{"command":"uv run --with pytest python -m pytest -q","timeout":20}}</tool>',
-    "write_file": '<tool name="write_file" path="binary_search.py"><content>def binary_search(nums, target):\n    return -1\n</content></tool>',
-    "patch_file": '<tool name="patch_file" path="binary_search.py"><old_text>return -1</old_text><new_text>return mid</new_text></tool>',
-    "delegate": '<tool>{"name":"delegate","args":{"task":"inspect README.md","max_steps":3}}</tool>',
+    "list_files": '{"path": "."}',
+    "read_file": '{"path": "README.md", "start": 1, "end": 80}',
+    "search": '{"pattern": "binary_search", "path": "."}',
+    "run_shell": '{"command": "uv run --with pytest python -m pytest -q", "timeout": 20}',
+    "write_file": '{"path": "binary_search.py", "content": "def binary_search(nums, target):\\n    return -1\\n"}',
+    "patch_file": '{"path": "binary_search.py", "old_text": "return -1", "new_text": "return mid"}',
+    "delegate": '{"task": "inspect README.md", "max_steps": 3}',
 }
 
 
@@ -77,6 +81,50 @@ def build_tool_registry(agent):
 
 def tool_example(name):
     return TOOL_EXAMPLES.get(name, "")
+
+
+_SCHEMA_TYPE_TO_JSON_TYPE = {"str": "string", "int": "integer"}
+
+
+def _schema_field_to_json_schema(field_value):
+    # 微型 DSL 里 "int=20" 表示"有默认值 20，因此非必填"；
+    # 没有 "=" 的字段（比如 "str"）表示必填，没有默认值。
+    type_name, _, _default = str(field_value).partition("=")
+    is_required = "=" not in str(field_value)
+    json_type = _SCHEMA_TYPE_TO_JSON_TYPE.get(type_name.strip(), "string")
+    return {"type": json_type}, is_required
+
+
+def to_openai_function_specs(tools):
+    """把 `BASE_TOOL_SPECS` 风格的微型 DSL 翻译成标准 OpenAI function-calling 的 `tools=` 数组。
+
+    `BASE_TOOL_SPECS`/`DELEGATE_TOOL_SPEC` 是这份 schema 的唯一来源；这里只是
+    多提供一种读法，不引入第二份手写的 JSON Schema，避免两份定义互相漂移。
+    """
+    specs = []
+    for name, tool in tools.items():
+        properties = {}
+        required = []
+        for field_name, field_value in tool["schema"].items():
+            prop, is_required = _schema_field_to_json_schema(field_value)
+            properties[field_name] = prop
+            if is_required:
+                required.append(field_name)
+        specs.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": tool["description"],
+                    "parameters": {
+                        "type": "object",
+                        "properties": properties,
+                        "required": required,
+                    },
+                },
+            }
+        )
+    return specs
 
 
 def validate_tool(agent, name, args):

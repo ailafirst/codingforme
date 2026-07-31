@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from codingforme import FakeModelClient, CodingForMe, SessionStore, WorkspaceContext
 from codingforme import cli as mini_cli
+from codingforme.models import final_answer, tool_call
 from codingforme.task_state import TaskState
 
 
@@ -178,10 +179,10 @@ def test_delegate_child_is_read_only(tmp_path):
     agent = build_agent(
         tmp_path,
         [
-            '<tool>{"name":"delegate","args":{"task":"write a file","max_steps":2}}</tool>',
-            '<tool>{"name":"write_file","args":{"path":"child-was-not-allowed.txt","content":"nope"}}</tool>',
-            "<final>child done</final>",
-            "<final>parent done</final>",
+            tool_call("delegate", task="write a file", max_steps=2),
+            tool_call("write_file", path="child-was-not-allowed.txt", content="nope"),
+            final_answer("child done"),
+            final_answer("parent done"),
         ],
     )
 

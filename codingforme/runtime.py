@@ -101,8 +101,13 @@ class CodingForMe:
         shell_env_allowlist=None,
         secret_env_names=None,
         feature_flags=None,
+        on_token=None,
     ):
         self.model_client = model_client
+        # 可选的流式回调：传入时 model_client.complete() 会走 SSE 流式，
+        # 每个文本增量都会实时回调给它（比如 REPL 想要边生成边显示）。
+        # 不传（默认）时行为和之前完全一样，一次性拿完整结果。
+        self.on_token = on_token
         self.workspace = workspace
         self.root = Path(workspace.repo_root)
         self.session_store = session_store
@@ -132,6 +137,10 @@ class CodingForMe:
         )
         self.session["memory"] = self.memory.to_dict()
         self.tools = self.build_tools()
+        # 由 model client 声明自己能不能吃标准 function-calling 的 tools=。
+        # prefix 的协议说明、ask() 要不要发 tools=、retry notice 的措辞都看它，
+        # 保证"发出去的协议"和"教给模型的协议"永远是同一套。
+        self.native_tool_calls = bool(getattr(model_client, "supports_native_tool_calls", False))
         self.prefix_state = self.build_prefix()
         self.prefix = self.prefix_state.text
         self.context_manager = ContextManager(self)
@@ -145,6 +154,10 @@ class CodingForMe:
         self.last_durable_rejections = []
         self.last_durable_superseded = []
         self._last_tool_result_metadata = {}
+        # 有多少次工具调用是靠 parse() 的宽容标签读取捞回来的（而不是走标准
+        # function-calling 接口）。健康状态下应当恒为 0，非 0 说明模型在偏离
+        # 我们唯一宣传的那套协议。
+        self.text_protocol_tool_calls = 0
         self._last_prefix_refresh = {
             "workspace_changed": False,
             "prefix_changed": False,
@@ -318,6 +331,11 @@ class CodingForMe:
                     "description": tool["description"],
                 }
             )
+        # 同时哈希翻译成标准 function-calling 的 JSON Schema 形状，
+        # 这样万一 to_openai_function_specs() 的翻译逻辑出 bug、悄悄改变了
+        # 发给模型的 tools= schema，也能被这份签名和 prompt cache/resume
+        # 的一致性检查捕捉到，而不是一个没有测试保护的隐藏副作用。
+        payload.append({"function_specs": toolkit.to_openai_function_specs(self.tools)})
         return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
     def build_prefix(self):
@@ -327,16 +345,17 @@ class CodingForMe:
             risk = "approval required" if tool["risky"] else "safe"
             tool_lines.append(f"- {name}({fields}) [{risk}] {tool['description']}")
         tool_text = "\n".join(tool_lines)
-        examples = "\n".join(
-            [
-                '<tool>{"name":"list_files","args":{"path":"."}}</tool>',
-                '<tool>{"name":"read_file","args":{"path":"README.md","start":1,"end":80}}</tool>',
-                '<tool name="write_file" path="binary_search.py"><content>def binary_search(nums, target):\n    return -1\n</content></tool>',
-                '<tool name="patch_file" path="binary_search.py"><old_text>return -1</old_text><new_text>return mid</new_text></tool>',
-                '<tool>{"name":"run_shell","args":{"command":"uv run --with pytest python -m pytest -q","timeout":20}}</tool>',
-                "<final>Done.</final>",
-            ]
-        )
+        # prefix 只教一套协议：标准 function-calling。
+        #
+        # 这里曾经按后端能力二选一地教「原生」或「<tool> 文本标签」。放弃文本那套
+        # 是因为它从来不是真正的故障降级——协议在构造 client 时就定死了，一次请求
+        # 里不会从原生掉到标签，所谓"兜底"其实从不触发。而两套协议一旦有可能同时
+        # 出现，代价却是实打实的：实测同一个后端 19 次走原生、17 次吐文本标签，
+        # 推理模型还会把 <tool> 标签埋进 reasoning_content 里让整轮作废。
+        #
+        # 现在 parse() 里的标签解析降级成"宽容读取"：模型万一自己吐了标签也照收，
+        # 但我们绝不再教它这么做。见 CodingForMe.parse()。
+        #
         # prefix 可以理解成 agent 的“工作手册”：
         # 它是谁、工具怎么调用、当前仓库是什么状态，都写在这里。
         text = textwrap.dedent(
@@ -345,13 +364,9 @@ class CodingForMe:
 
             Rules:
             - Use tools instead of guessing about the workspace.
-            - Return exactly one <tool>...</tool> or one <final>...</final>.
-            - Tool calls must look like:
-              <tool>{{"name":"tool_name","args":{{...}}}}</tool>
-            - For write_file and patch_file with multi-line text, prefer XML style:
-              <tool name="write_file" path="file.py"><content>...</content></tool>
-            - Final answers must look like:
-              <final>your answer</final>
+            - Call tools through the provided function-calling interface, one call at a time.
+            - Never write tool calls as text or XML in your reply; use the tool-call interface.
+            - When you are done, reply with the answer as plain text and no tool call.
             - Never invent tool results.
             - Keep answers concise and concrete.
             - If the user asks you to create or update a specific file and the path is clear, use write_file or patch_file instead of repeatedly listing files.
@@ -363,9 +378,6 @@ class CodingForMe:
 
             Tools:
             {tool_text}
-
-            Valid response examples:
-            {examples}
 
             {self.workspace.text()}
             """
@@ -547,6 +559,8 @@ class CodingForMe:
                 "workspace_changed": refresh["workspace_changed"],
                 "prefix_changed": refresh["prefix_changed"],
                 "prompt_cache_supported": bool(getattr(self.model_client, "supports_prompt_cache", False)),
+                "native_tool_calls": self.native_tool_calls,
+                "text_protocol_tool_calls": self.text_protocol_tool_calls,
                 "resume_status": self.resume_state.get("status", CHECKPOINT_NONE_STATUS),
                 "stale_summary_invalidations": int(self.resume_state.get("stale_summary_invalidations", 0)),
                 "stale_paths": list(self.resume_state.get("stale_paths", [])),
@@ -875,6 +889,8 @@ class CodingForMe:
                 self.max_new_tokens,
                 prompt_cache_key=prompt_cache_key,
                 prompt_cache_retention=prompt_cache_retention,
+                tools=toolkit.to_openai_function_specs(self.tools) if self.native_tool_calls else None,
+                on_token=self.on_token,
             )
             completion_metadata = dict(getattr(self.model_client, "last_completion_metadata", {}) or {})
             if completion_metadata:
@@ -884,11 +900,22 @@ class CodingForMe:
             self.last_completion_metadata = completion_metadata
             self.last_prompt_metadata = prompt_metadata
             kind, payload = self.parse(raw)
+            # 协议漂移的观测点：prompt 只教标准 function-calling，所以这里但凡
+            # 是靠标签解析出来的工具调用，都说明模型没走我们给的接口。之前那次
+            # 19:17 的分裂只能靠真实后端跑基准才偶然看见，现在它是 trace 和
+            # report 里的一个数字。
+            text_protocol_tool_call = kind == "tool" and not (isinstance(raw, dict) and raw.get("tool_calls"))
+            if text_protocol_tool_call:
+                self.text_protocol_tool_calls += 1
+                # prompt_metadata 是在模型调用**之前**组好的，这里补一次，
+                # 让写进 report 的计数包含当前这一轮而不是滞后一轮。
+                prompt_metadata["text_protocol_tool_calls"] = self.text_protocol_tool_calls
             self.emit_trace(
                 task_state,
                 "model_parsed",
                 {
                     "kind": kind,
+                    "text_protocol_tool_call": text_protocol_tool_call,
                     "completion_metadata": completion_metadata,
                     "duration_ms": int((time.monotonic() - model_started_at) * 1000),
                 },
@@ -939,7 +966,8 @@ class CodingForMe:
                 self.run_store.write_task_state(task_state)
                 continue
 
-            final = (payload or raw).strip()
+            raw_text = raw["text"] if isinstance(raw, dict) else str(raw)
+            final = (payload or raw_text).strip()
             self.record({"role": "assistant", "content": final, "created_at": now()})
             task_state.finish_success(final)
             self.promote_durable_memory(user_message, final)
@@ -1038,7 +1066,7 @@ class CodingForMe:
             example = self.tool_example(name)
             message = f"error: invalid arguments for {name}: {exc}"
             if example:
-                message += f"\nexample: {example}"
+                message += f"\nexample arguments: {example}"
             security_event_type = "path_escape" if "path escapes workspace" in str(exc) else ""
             self._last_tool_result_metadata = {
                 "tool_status": "rejected",
@@ -1218,14 +1246,46 @@ class CodingForMe:
         审批和执行链路就没法可靠工作。
 
         输入 / 输出：
-        - 输入：模型返回的原始文本 `raw`
+        - 输入：`raw`，或者是模型返回的原始文本（旧协议 / `FakeModelClient`），
+          或者是 `model_client.complete()` 的结构化结果
+          `{"text": str, "tool_calls": [...] | None}`（原生 function-calling）。
         - 输出：`(kind, payload)`，其中 `kind` 可能是 `tool`、`final`、`retry`
 
         在 agent 链路里的位置：
         它位于 `model_client.complete()` 之后、`run_tool()` 之前，是模型输出
         进入平台控制流的第一道结构化关口。
+
+        标准路径只有一条：`tool_calls`。下面的 `<tool>`/`<final>` 标签解析是
+        **宽容读取**，不是第二套协议——prompt 里不再教它，工具报错信息里也不再
+        举它的例子（见 `build_prefix()`）。留着它只为一件事：模型万一自作主张
+        把调用写成文本（推理模型偶发、后端不吃 `tools=` 时的即兴发挥），别让那
+        一轮白白作废。走到这条分支属于异常而非常态，`ask()` 会把它记进 trace 和
+        report 的 `text_protocol_tool_calls`，这样"协议漂移"是一个能被观测到的
+        数字，而不是只能靠真实后端跑基准才偶然发现的现象。
         """
-        raw = str(raw)
+        if isinstance(raw, dict):
+            tool_calls = raw.get("tool_calls")
+            text = raw.get("text", "")
+        else:
+            tool_calls = None
+            text = raw
+
+        if tool_calls:
+            if len(tool_calls) > 1:
+                return "retry", CodingForMe.retry_notice("model returned more than one tool call; return exactly one")
+            call = tool_calls[0] if isinstance(tool_calls[0], dict) else {}
+            name = str(call.get("name", "")).strip()
+            if not name:
+                return "retry", CodingForMe.retry_notice("tool call is missing a tool name")
+            args = call.get("args", {})
+            if args is None:
+                args = {}
+            elif not isinstance(args, dict):
+                return "retry", CodingForMe.retry_notice()
+            return "tool", {"name": name, "args": args}
+
+        raw = str(text)
+        # 走到这里说明后端没有返回原生 tool_calls，回退到文本兜底协议。
         # 这里支持两种工具格式：
         # 1. <tool>...</tool> 里包 JSON，适合简短调用
         # 2. XML 风格属性/子标签，适合写文件这类多行内容
@@ -1267,9 +1327,12 @@ class CodingForMe:
             prefix += f": {problem}"
         else:
             prefix += ": model returned malformed tool output"
+        # 这条 notice 会被写回 history，模型下一轮就读到它。它教的必须是
+        # prefix 里那唯一一套协议——曾经在这里教 <tool> 标签，等于在模型出错
+        # 的那一刻把它推向一套我们既没发 schema、也不打算支持的协议。
         return (
-            f"{prefix}. Reply with a valid <tool> call or a non-empty <final> answer. "
-            'For multi-line files, prefer <tool name="write_file" path="file.py"><content>...</content></tool>.'
+            f"{prefix}. Either emit exactly one tool call through the function-calling "
+            "interface, or reply with a non-empty plain-text answer."
         )
 
     @staticmethod

@@ -5,6 +5,9 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+from litellm.types.utils import ModelResponse
+
 import codingforme as mini_pkg
 from codingforme import (
     FakeModelClient,
@@ -14,6 +17,8 @@ from codingforme import (
     WorkspaceContext,
     build_welcome,
 )
+from codingforme.models import _CompatBackendCustomLLM, final_answer, force_tool_choice, tool_call
+from codingforme.tools import to_openai_function_specs
 
 
 def build_workspace(tmp_path):
@@ -22,11 +27,18 @@ def build_workspace(tmp_path):
 
 
 def build_agent(tmp_path, outputs, **kwargs):
+    """默认走原生 function-calling——和真实后端一致。
+
+    脚本化输出用 `tool_call()` / `final_answer()` 构造，形状就是
+    `model_client.complete()` 的返回值。`text_protocol=True` 只是把 client 标成
+    "不吃 tools=" 的纯传输开关,不再改变教给模型的协议。
+    """
     workspace = build_workspace(tmp_path)
     store = SessionStore(tmp_path / ".codingforme" / "sessions")
     approval_policy = kwargs.pop("approval_policy", "auto")
+    text_protocol = kwargs.pop("text_protocol", False)
     return CodingForMe(
-        model_client=FakeModelClient(outputs),
+        model_client=FakeModelClient(outputs, supports_native_tool_calls=not text_protocol),
         workspace=workspace,
         session_store=store,
         approval_policy=approval_policy,
@@ -39,8 +51,8 @@ def test_agent_runs_tool_then_final(tmp_path):
     agent = build_agent(
         tmp_path,
         [
-            '<tool>{"name":"read_file","args":{"path":"hello.txt","start":1,"end":2}}</tool>',
-            "<final>Read the file successfully.</final>",
+            tool_call("read_file", path="hello.txt", start=1, end=2),
+            final_answer("Read the file successfully."),
         ],
     )
 
@@ -55,8 +67,8 @@ def test_agent_updates_task_summary_on_each_request(tmp_path):
     agent = build_agent(
         tmp_path,
         [
-            "<final>First pass.</final>",
-            "<final>Second pass.</final>",
+            final_answer("First pass."),
+            final_answer("Second pass."),
         ],
     )
 
@@ -72,9 +84,9 @@ def test_agent_only_stores_reusable_epistemic_notes(tmp_path):
     agent = build_agent(
         tmp_path,
         [
-            '<tool>{"name":"read_file","args":{"path":"facts.txt","start":1,"end":1}}</tool>',
-            "<final>Done.</final>",
-            "<final>It is red.</final>",
+            tool_call("read_file", path="facts.txt", start=1, end=1),
+            final_answer("Done."),
+            final_answer("It is red."),
         ],
     )
 
@@ -85,7 +97,7 @@ def test_agent_only_stores_reusable_epistemic_notes(tmp_path):
     assert not any(note["text"] == "Done." for note in notes)
 
     resumed = CodingForMe.from_session(
-        model_client=FakeModelClient(["<final>It is red.</final>"]),
+        model_client=FakeModelClient([final_answer("It is red.")]),
         workspace=agent.workspace,
         session_store=agent.session_store,
         session_id=agent.session["id"],
@@ -127,8 +139,8 @@ def test_agent_retries_after_empty_model_output(tmp_path):
     agent = build_agent(
         tmp_path,
         [
-            "",
-            "<final>Recovered after retry.</final>",
+            final_answer(""),
+            final_answer("Recovered after retry."),
         ],
     )
 
@@ -140,13 +152,18 @@ def test_agent_retries_after_empty_model_output(tmp_path):
 
 
 def test_agent_retries_after_malformed_tool_payload(tmp_path):
+    """原生路径下的畸形调用：结构合法，但 arguments 不是一个 JSON 对象。
+
+    真实后端会把模型吐出的 arguments 字符串原样带回来，`complete()` 解不出 dict
+    时就把原字符串放进 args——这里直接脚本化那个形状。
+    """
     (tmp_path / "hello.txt").write_text("alpha\n", encoding="utf-8")
     agent = build_agent(
         tmp_path,
         [
-            '<tool>{"name":"read_file","args":"bad"}</tool>',
-            '<tool>{"name":"read_file","args":{"path":"hello.txt","start":1,"end":1}}</tool>',
-            "<final>Recovered after malformed tool output.</final>",
+            {"text": "", "tool_calls": [{"name": "read_file", "args": "bad"}]},
+            tool_call("read_file", path="hello.txt", start=1, end=1),
+            final_answer("Recovered after malformed tool output."),
         ],
     )
 
@@ -155,13 +172,20 @@ def test_agent_retries_after_malformed_tool_payload(tmp_path):
     assert answer == "Recovered after malformed tool output."
     assert any(item["role"] == "tool" and item["name"] == "read_file" for item in agent.session["history"])
     notices = [item["content"] for item in agent.session["history"] if item["role"] == "assistant"]
-    assert any("valid <tool> call" in item for item in notices)
+    assert any("function-calling interface" in item for item in notices)
 
 
-def test_agent_accepts_xml_write_file_tool(tmp_path):
+def test_tolerant_tag_reading_still_rescues_a_turn(tmp_path):
+    """标签解析降级成"宽容读取"之后仍要能捞回那一轮。
+
+    prompt 不再教这套写法，但模型偶尔还是会把调用写成文本（推理模型尤甚）。
+    那时既不能崩、也不能白白浪费一轮：JSON 式 <tool>、适合多行内容的 XML 式
+    <tool ...>、以及 <final> 都要照旧解析出来。
+    """
     agent = build_agent(
         tmp_path,
         [
+            '<tool>{"name":"read_file","args":"bad"}</tool>',
             '<tool name="write_file" path="hello.py"><content>print("hi")\n</content></tool>',
             "<final>Done.</final>",
         ],
@@ -171,15 +195,32 @@ def test_agent_accepts_xml_write_file_tool(tmp_path):
 
     assert answer == "Done."
     assert (tmp_path / "hello.py").read_text(encoding="utf-8") == 'print("hi")\n'
+    # 宽容读取捞回来的调用会被计数，好让"协议漂移"可观测。
+    assert agent.text_protocol_tool_calls == 1
+    assert agent.last_prompt_metadata["text_protocol_tool_calls"] == 1
+
+
+def test_native_tool_calls_do_not_count_as_protocol_drift(tmp_path):
+    """走标准接口的调用不能被记成漂移，否则这个指标没有意义。"""
+    agent = build_agent(
+        tmp_path,
+        [
+            tool_call("list_files", path="."),
+            final_answer("Done."),
+        ],
+    )
+
+    assert agent.ask("list the files") == "Done."
+    assert agent.text_protocol_tool_calls == 0
 
 
 def test_retries_do_not_consume_the_whole_budget(tmp_path):
     agent = build_agent(
         tmp_path,
         [
-            "",
-            "",
-            "<final>Recovered after several retries.</final>",
+            final_answer(""),
+            final_answer(""),
+            final_answer("Recovered after several retries."),
         ],
         max_steps=1,
     )
@@ -190,11 +231,11 @@ def test_retries_do_not_consume_the_whole_budget(tmp_path):
 
 
 def test_agent_saves_and_resumes_session(tmp_path):
-    agent = build_agent(tmp_path, ["<final>First pass.</final>"])
+    agent = build_agent(tmp_path, [final_answer("First pass.")])
     assert agent.ask("Start a session") == "First pass."
 
     resumed = CodingForMe.from_session(
-        model_client=FakeModelClient(["<final>Resumed.</final>"]),
+        model_client=FakeModelClient([final_answer("Resumed.")]),
         workspace=agent.workspace,
         session_store=agent.session_store,
         session_id=agent.session["id"],
@@ -209,9 +250,9 @@ def test_delegate_uses_child_agent(tmp_path):
     agent = build_agent(
         tmp_path,
         [
-            '<tool>{"name":"delegate","args":{"task":"inspect README","max_steps":2}}</tool>',
-            "<final>Child result.</final>",
-            "<final>Parent incorporated the child result.</final>",
+            tool_call("delegate", task="inspect README", max_steps=2),
+            final_answer("Child result."),
+            final_answer("Parent incorporated the child result."),
         ],
     )
 
@@ -248,7 +289,9 @@ def test_invalid_risky_tool_does_not_prompt_for_approval(tmp_path):
         result = agent.run_tool("write_file", {})
 
     assert result.startswith("error: invalid arguments for write_file: 'path'")
-    assert 'example: <tool name="write_file"' in result
+    # 报错信息只示范参数对象，不示范调用形式——调用形式由 function-calling 接口决定。
+    assert 'example arguments: {"path": "binary_search.py"' in result
+    assert "<tool" not in result
     mock_input.assert_not_called()
 
 
@@ -318,7 +361,7 @@ def test_openai_compatible_client_posts_expected_chat_completions_payload():
 
         def read(self):
             return json.dumps(
-                {"choices": [{"message": {"content": "<final>ok</final>"}}]}
+                {"choices": [{"message": {"content": "backend text"}}]}
             ).encode("utf-8")
 
     def fake_urlopen(request, timeout):
@@ -339,7 +382,7 @@ def test_openai_compatible_client_posts_expected_chat_completions_payload():
     with patch("urllib.request.urlopen", fake_urlopen):
         result = client.complete("hello", 42)
 
-    assert result == "<final>ok</final>"
+    assert result == {"text": "backend text", "tool_calls": None}
     assert captured["url"] == "https://right.codes/v1/chat/completions"
     assert captured["timeout"] == 30
     assert captured["headers"]["Authorization"] == "Bearer sk-test"
@@ -375,7 +418,7 @@ def test_openai_compatible_client_sends_prompt_cache_fields_and_records_usage():
         def read(self):
             return json.dumps(
                 {
-                    "output_text": "<final>ok</final>",
+                    "output_text": "backend text",
                     "usage": {
                         "input_tokens": 2048,
                         "input_tokens_details": {"cached_tokens": 1536},
@@ -408,7 +451,7 @@ def test_openai_compatible_client_sends_prompt_cache_fields_and_records_usage():
             prompt_cache_retention="in_memory",
         )
 
-    assert result == "<final>ok</final>"
+    assert result == {"text": "backend text", "tool_calls": None}
     assert captured["body"]["prompt_cache_key"] == "prefix-hash-123"
     assert captured["body"]["prompt_cache_retention"] == "in_memory"
     assert client.last_completion_metadata["prompt_cache_supported"] is True
@@ -430,7 +473,7 @@ def test_openai_compatible_client_extracts_text_from_event_stream():
         def read(self):
             return (
                 'data: {"type":"response.created","response":{"id":"resp_1","output":[]}}\n'
-                'data: {"type":"response.completed","response":{"output":[{"content":[{"text":"<final>stream ok</final>"}]}]}}\n'
+                'data: {"type":"response.completed","response":{"output":[{"content":[{"text":"streamed backend text"}]}]}}\n'
                 "data: [DONE]\n"
             ).encode("utf-8")
 
@@ -445,7 +488,7 @@ def test_openai_compatible_client_extracts_text_from_event_stream():
     with patch("urllib.request.urlopen", return_value=FakeResponse()):
         result = client.complete("hello", 42)
 
-    assert result == "<final>stream ok</final>"
+    assert result == {"text": "streamed backend text", "tool_calls": None}
 
 
 def test_openai_compatible_client_extracts_text_from_event_stream_deltas():
@@ -461,11 +504,11 @@ def test_openai_compatible_client_extracts_text_from_event_stream_deltas():
         def read(self):
             return (
                 'event: response.output_text.delta\n'
-                'data: {"type":"response.output_text.delta","delta":"<final>"}\n'
+                'data: {"type":"response.output_text.delta","delta":"streamed "}\n'
                 'event: response.output_text.delta\n'
-                'data: {"type":"response.output_text.delta","delta":"OK"}\n'
+                'data: {"type":"response.output_text.delta","delta":"done"}\n'
                 'event: response.output_text.done\n'
-                'data: {"type":"response.output_text.done","text":"<final>OK</final>"}\n'
+                'data: {"type":"response.output_text.done","text":"streamed done"}\n'
                 "data: [DONE]\n"
             ).encode("utf-8")
 
@@ -480,8 +523,576 @@ def test_openai_compatible_client_extracts_text_from_event_stream_deltas():
     with patch("urllib.request.urlopen", return_value=FakeResponse()):
         result = client.complete("hello", 42)
 
-    assert result == "<final>OK</final>"
+    assert result == {"text": "streamed done", "tool_calls": None}
 
+
+# ---------------------------------------------------------------------------
+# 原生 function-calling 协议：parse() 的 tool_calls 分支、CustomLLM 桥接、
+# tool_signature() 对 schema 翻译的敏感度。
+# ---------------------------------------------------------------------------
+
+
+def test_parse_accepts_native_tool_call():
+    kind, payload = CodingForMe.parse({"text": "", "tool_calls": [{"name": "list_files", "args": {"path": "."}}]})
+    assert kind == "tool"
+    assert payload == {"name": "list_files", "args": {"path": "."}}
+
+
+def test_parse_rejects_more_than_one_native_tool_call():
+    kind, payload = CodingForMe.parse(
+        {
+            "text": "",
+            "tool_calls": [
+                {"name": "list_files", "args": {"path": "."}},
+                {"name": "read_file", "args": {"path": "README.md"}},
+            ],
+        }
+    )
+    assert kind == "retry"
+
+
+def test_parse_retries_when_native_tool_call_args_are_not_a_dict():
+    kind, _ = CodingForMe.parse({"text": "", "tool_calls": [{"name": "list_files", "args": "not-json"}]})
+    assert kind == "retry"
+
+
+def test_parse_retries_when_native_tool_call_missing_name():
+    kind, _ = CodingForMe.parse({"text": "", "tool_calls": [{"name": "", "args": {}}]})
+    assert kind == "retry"
+
+
+def test_parse_falls_back_to_text_tags_when_no_native_tool_calls():
+    # 后端不支持 tools=（或者就是 FakeModelClient 的裸字符串）时，
+    # dict 里 tool_calls 是 None/空，走原来的文本标签兜底解析。
+    kind, payload = CodingForMe.parse({"text": '<tool>{"name":"list_files","args":{"path":"."}}</tool>', "tool_calls": None})
+    assert kind == "tool"
+    assert payload == {"name": "list_files", "args": {"path": "."}}
+
+    kind, final = CodingForMe.parse({"text": "<final>plain text answer</final>", "tool_calls": []})
+    assert kind == "final"
+    assert final == "plain text answer"
+
+
+def test_agent_executes_native_tool_call_end_to_end(tmp_path):
+    (tmp_path / "hello.txt").write_text("alpha\n", encoding="utf-8")
+    agent = build_agent(
+        tmp_path,
+        [
+            {"text": "", "tool_calls": [{"name": "list_files", "args": {"path": "."}}]},
+            {"text": "Done.", "tool_calls": None},
+        ],
+    )
+    assert agent.ask("list the files") == "Done."
+
+
+def test_to_openai_function_specs_marks_required_vs_optional():
+    specs = to_openai_function_specs(
+        {
+            "read_file": {
+                "schema": {"path": "str", "start": "int=1", "end": "int=200"},
+                "risky": False,
+                "description": "Read a UTF-8 file by line range.",
+            }
+        }
+    )
+    assert len(specs) == 1
+    function = specs[0]["function"]
+    assert function["name"] == "read_file"
+    assert function["parameters"]["properties"]["path"] == {"type": "string"}
+    assert function["parameters"]["properties"]["start"] == {"type": "integer"}
+    assert function["parameters"]["required"] == ["path"]
+
+
+def test_prompt_only_ever_teaches_the_function_calling_protocol(tmp_path):
+    """prompt 里只存在一套协议，且不随后端能力变化。
+
+    实测过：prefix 教 <tool> 文本协议、同时又发 tools= 原生 schema 时，
+    同一个后端会一半走原生、一半吐文本标签，推理模型还会把 <tool> 标签埋进
+    reasoning_content 里整轮作废。当时的修法是"两套互斥、按后端二选一"，现在
+    直接只留一套——互斥这条约束因此不再需要被维护，它没有可违反的对象了。
+    """
+    agent = build_agent(tmp_path, [])
+    assert "function-calling interface" in agent.prefix
+    assert "<tool>" not in agent.prefix
+    assert "<final>" not in agent.prefix
+    assert "Valid response examples:" not in agent.prefix
+    # 工具清单本身仍然保留：JSON Schema 里没有 approval/risk 这层信息。
+    assert "approval required" in agent.prefix
+
+    # 后端声明吃不吃 tools= 只影响传输，不再改变教给模型的协议。
+    text_agent = build_agent(tmp_path, [], text_protocol=True)
+    assert text_agent.native_tool_calls is False
+    assert text_agent.prefix == agent.prefix
+
+    # 报错信息是另一条通道，同样不能漏出标签写法。
+    assert "<tool" not in agent.run_tool("write_file", {})
+
+
+def test_ask_only_sends_tools_when_client_supports_native_tool_calls(tmp_path):
+    (tmp_path / "hello.txt").write_text("alpha\n", encoding="utf-8")
+
+    seen = {}
+
+    class _RecordingClient(FakeModelClient):
+        def complete(self, prompt, max_new_tokens, **kwargs):
+            seen.setdefault("tools", []).append(kwargs.get("tools"))
+            return super().complete(prompt, max_new_tokens, **kwargs)
+
+    workspace = build_workspace(tmp_path)
+    store = SessionStore(tmp_path / ".codingforme" / "sessions")
+    client = _RecordingClient([final_answer("done")], supports_native_tool_calls=False)
+    agent = CodingForMe(
+        model_client=client,
+        workspace=workspace,
+        session_store=store,
+        approval_policy="auto",
+    )
+    agent.ask("hi")
+    assert seen["tools"] == [None]
+
+    seen.clear()
+    client2 = _RecordingClient([final_answer("done")])
+    agent2 = CodingForMe(
+        model_client=client2,
+        workspace=workspace,
+        session_store=store,
+        approval_policy="auto",
+    )
+    agent2.ask("hi")
+    assert seen["tools"][0], "native client must receive the function specs"
+    assert {spec["function"]["name"] for spec in seen["tools"][0]} == set(agent2.tools)
+
+
+def test_retry_notice_points_back_at_the_only_protocol():
+    """出错重试的提示是写回 history 的，模型下一轮会读到它。
+
+    它必须指向 prefix 里那唯一一套协议：曾经在这里教 <tool> 标签，等于在模型
+    出错的那一刻把它推向一套我们既没发 schema、也不打算支持的协议。
+    """
+    notice = CodingForMe.retry_notice("boom")
+    assert "function-calling interface" in notice
+    assert "<tool>" not in notice
+    assert "<final>" not in notice
+
+
+def test_custom_backend_llm_retries_instead_of_crashing_on_reasoning_only_response():
+    """推理模型可能把全部输出放进 reasoning_content、让 content 为空。
+
+    这种响应结构合法但这一轮没有可用输出，必须归约成 retry 让模型重来，
+    而不是抛异常把整个 ask() 打断（实测跑基准时曾因此整任务崩溃）。
+    """
+    handler = _CompatBackendCustomLLM()
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/json"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "choices": [
+                        {
+                            "finish_reason": "stop",
+                            "message": {
+                                "content": "",
+                                "role": "assistant",
+                                "tool_calls": None,
+                                "reasoning_content": "thinking out loud, never finished",
+                            },
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 5, "completion_tokens": 7, "total_tokens": 12},
+                }
+            ).encode("utf-8")
+
+    with patch("urllib.request.urlopen", return_value=FakeResponse()):
+        response = handler.completion(
+            model="m",
+            messages=[{"role": "user", "content": "hi"}],
+            api_base="https://example.test/v1",
+            api_key="k",
+            timeout=5,
+            optional_params={},
+            model_response=ModelResponse(),
+        )
+
+    assert response.choices[0].message.content == ""
+    assert CodingForMe.parse({"text": "", "tool_calls": None})[0] == "retry"
+
+
+def test_capabilities_are_declared_not_guessed_from_url():
+    from codingforme.models import DEFAULT_CAPABILITIES, resolve_capabilities
+
+    # 未知后端拿保守默认值，而不是一个碰巧匹配上的 substring 猜测。
+    unknown = resolve_capabilities("https://api.unknown-vendor.test/v1")
+    assert unknown == DEFAULT_CAPABILITIES
+    assert unknown["prompt_cache_key"] is False
+    assert unknown["native_tool_calls"] is True
+
+    # 已知后端表生效。
+    assert resolve_capabilities("https://api.openai.com/v1")["prompt_cache_key"] is True
+
+    # 显式覆盖赢过已知后端表，None 表示"没意见"、让位给前面两层。
+    assert resolve_capabilities(
+        "https://api.openai.com/v1", {"prompt_cache_key": False}
+    )["prompt_cache_key"] is False
+    assert resolve_capabilities(
+        "https://api.openai.com/v1", {"prompt_cache_key": None}
+    )["prompt_cache_key"] is True
+
+    with pytest.raises(ValueError):
+        resolve_capabilities("https://x.test/v1", {"no_such_capability": True})
+
+
+def test_client_capabilities_drive_both_switches():
+    client = OpenAICompatibleModelClient(
+        model="m",
+        base_url="https://api.unknown-vendor.test",
+        api_key="k",
+        temperature=0.0,
+        timeout=5,
+        capabilities={"native_tool_calls": False, "prompt_cache_key": True},
+    )
+    assert client.supports_native_tool_calls is False
+    assert client.supports_prompt_cache is True
+    assert client.observed == {"prompt_cache_hit": False, "native_tool_calls": False}
+
+
+def test_metadata_separates_declared_capability_from_observed_behaviour():
+    """cache_hit 为真而 prompt_cache_supported 为假是正常的，不是矛盾。
+
+    实测后端不认 prompt_cache_key 字段，却一直在做自动前缀缓存。旧 metadata
+    只有一个 prompt_cache_supported，读起来像"没有缓存"，严重误导。
+    """
+    client = OpenAICompatibleModelClient(
+        model="m",
+        base_url="https://api.unknown-vendor.test",
+        api_key="k",
+        temperature=0.0,
+        timeout=5,
+    )
+    assert client.supports_prompt_cache is False
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/json"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "choices": [{"message": {"role": "assistant", "content": "hi"}}],
+                    "usage": {
+                        "prompt_tokens": 100,
+                        "completion_tokens": 5,
+                        "total_tokens": 105,
+                        "prompt_tokens_details": {"cached_tokens": 64},
+                    },
+                }
+            ).encode("utf-8")
+
+    with patch("urllib.request.urlopen", return_value=FakeResponse()):
+        client.complete("hi", 32, prompt_cache_key="abc")
+
+    meta = client.last_completion_metadata
+    assert meta["prompt_cache_supported"] is False
+    assert meta["prompt_cache_key_sent"] is False, "未声明支持时不应该发 cache key"
+    assert meta["cache_hit"] is True, "后端自动前缀缓存仍然生效"
+    assert meta["cached_tokens"] == 64
+    assert client.observed["prompt_cache_hit"] is True
+
+
+def test_scripted_outputs_use_the_same_shape_as_a_real_backend():
+    """脚本化输出的形状必须和 complete() 的真实返回值一致。
+
+    这是"测试覆盖生产路径"的守门测试：只要 FakeModelClient 默认走原生协议、
+    tool_call()/final_answer() 产出的就是 tool_calls 分支的形状，一整套用例
+    验证的就不再是生产环境永远不走的文本解析路径。
+    """
+    assert FakeModelClient([]).supports_native_tool_calls is True
+
+    call = tool_call("read_file", path="a.txt", start=1, end=2)
+    assert call == {"text": "", "tool_calls": [{"name": "read_file", "args": {"path": "a.txt", "start": 1, "end": 2}}]}
+    assert CodingForMe.parse(call) == ("tool", {"name": "read_file", "args": {"path": "a.txt", "start": 1, "end": 2}})
+
+    answer = final_answer("Done.")
+    assert answer == {"text": "Done.", "tool_calls": None}
+    assert CodingForMe.parse(answer) == ("final", "Done.")
+
+
+def test_forced_tool_choice_applies_once_and_then_clears():
+    """安全评测强制的那次工具调用不能泄漏到后续请求。
+
+    tool_choice 锁定一个工具后模型就给不出最终答案了，只会被逼着一直调工具
+    直到步数耗尽——所以它必须严格只作用于紧接着的一次 complete()。
+    """
+    client = OpenAICompatibleModelClient(
+        model="m",
+        base_url="https://api.unknown-vendor.test",
+        api_key="k",
+        temperature=0.0,
+        timeout=5,
+    )
+    specs = to_openai_function_specs(
+        {"list_files": {"schema": {"path": "str='.'"}, "risky": False, "description": "List files."}}
+    )
+    sent = []
+
+    def fake_completion(**kwargs):
+        sent.append(kwargs.get("tool_choice"))
+        return ModelResponse(
+            choices=[{"index": 0, "message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}]
+        )
+
+    client.pending_tool_choice = force_tool_choice("list_files")
+    with patch("codingforme.models.litellm.completion", side_effect=fake_completion):
+        client.complete("go", 32, tools=specs)
+        assert client.last_completion_metadata["tool_choice_forced"] is True
+        client.complete("go again", 32, tools=specs)
+        assert client.last_completion_metadata["tool_choice_forced"] is False
+
+    assert sent == [{"type": "function", "function": {"name": "list_files"}}, "auto"]
+    assert client.pending_tool_choice is None
+
+
+def test_forced_tool_choice_is_dropped_when_tools_are_not_sent():
+    """没发 tools= 的那一轮也要把强制意图取走，否则会落到下一次无关请求上。"""
+    client = OpenAICompatibleModelClient(
+        model="m",
+        base_url="https://api.unknown-vendor.test",
+        api_key="k",
+        temperature=0.0,
+        timeout=5,
+    )
+
+    def fake_completion(**kwargs):
+        assert "tool_choice" not in kwargs
+        return ModelResponse(
+            choices=[{"index": 0, "message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}]
+        )
+
+    client.pending_tool_choice = force_tool_choice("list_files")
+    with patch("codingforme.models.litellm.completion", side_effect=fake_completion):
+        client.complete("go", 32)
+
+    assert client.pending_tool_choice is None
+    assert client.last_completion_metadata["tool_choice_forced"] is False
+
+
+def test_tool_signature_changes_when_schema_changes(tmp_path):
+    agent = build_agent(tmp_path, [])
+    original = agent.tool_signature()
+    agent.tools["list_files"]["schema"] = dict(agent.tools["list_files"]["schema"], extra="str='x'")
+    changed = agent.tool_signature()
+    assert original != changed
+
+
+def test_custom_backend_llm_extracts_tool_calls_from_standard_choices_response():
+    handler = _CompatBackendCustomLLM()
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/json"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": None,
+                                "tool_calls": [
+                                    {
+                                        "id": "call_1",
+                                        "type": "function",
+                                        "function": {"name": "list_files", "arguments": '{"path": "."}'},
+                                    }
+                                ],
+                            }
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+                }
+            ).encode("utf-8")
+
+    model_response = ModelResponse()
+    with patch("urllib.request.urlopen", return_value=FakeResponse()):
+        result = handler.completion(
+            model="test-model",
+            messages=[{"role": "user", "content": "hi"}],
+            api_base="https://example.test/v1",
+            api_key="sk-test",
+            timeout=10,
+            optional_params={},
+            model_response=model_response,
+        )
+
+    tool_calls = result.choices[0].message.tool_calls
+    assert tool_calls[0].function.name == "list_files"
+    assert tool_calls[0].function.arguments == '{"path": "."}'
+    assert result.usage.prompt_tokens == 10
+
+
+def test_custom_backend_llm_handles_output_text_shape_without_choices():
+    # 已知的真实后端怪癖之一：/chat/completions 上返回 Responses-API 风格的
+    # output_text，而不是标准的 choices。litellm 内建传输遇到这种形状会直接
+    # 报错，CustomLLM 桥接必须继续兼容它。
+    handler = _CompatBackendCustomLLM()
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/json"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "output_text": "backend text",
+                    "usage": {"input_tokens": 2048, "input_tokens_details": {"cached_tokens": 1536}, "output_tokens": 32, "total_tokens": 2080},
+                }
+            ).encode("utf-8")
+
+    model_response = ModelResponse()
+    with patch("urllib.request.urlopen", return_value=FakeResponse()):
+        result = handler.completion(
+            model="test-model",
+            messages=[{"role": "user", "content": "hi"}],
+            api_base="https://example.test/v1",
+            api_key="sk-test",
+            timeout=10,
+            optional_params={},
+            model_response=model_response,
+        )
+
+    assert result.choices[0].message.content == "backend text"
+    assert result.usage.prompt_tokens_details.cached_tokens == 1536
+
+
+def test_custom_backend_llm_handles_sse_despite_non_stream_request():
+    # 另一个已知怪癖：声明 stream:false 但后端仍返回 SSE。
+    handler = _CompatBackendCustomLLM()
+
+    class FakeResponse:
+        headers = {"Content-Type": "text/event-stream"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return (
+                'data: {"type":"response.output_text.delta","delta":"streamed "}\n'
+                'data: {"type":"response.output_text.delta","delta":"done"}\n'
+                'data: {"type":"response.output_text.done","text":"streamed done"}\n'
+                "data: [DONE]\n"
+            ).encode("utf-8")
+
+    model_response = ModelResponse()
+    with patch("urllib.request.urlopen", return_value=FakeResponse()):
+        result = handler.completion(
+            model="test-model",
+            messages=[{"role": "user", "content": "hi"}],
+            api_base="https://example.test/v1",
+            api_key="sk-test",
+            timeout=10,
+            optional_params={},
+            model_response=model_response,
+        )
+
+    assert result.choices[0].message.content == "streamed done"
+
+
+class _FakeStreamResponse:
+    headers = {"Content-Type": "text/event-stream"}
+
+    def __init__(self, lines):
+        self._lines = lines
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def __iter__(self):
+        return iter(self._lines)
+
+
+def test_custom_backend_llm_streaming_parses_standard_delta_chunks():
+    handler = _CompatBackendCustomLLM()
+    lines = [
+        b'data: {"choices":[{"delta":{"content":"Hello","role":"assistant"},"finish_reason":null,"index":0}]}\n',
+        b'data: {"choices":[{"delta":{"content":" world"},"finish_reason":null,"index":0}]}\n',
+        b'data: {"choices":[{"delta":{},"finish_reason":"stop","index":0}],'
+        b'"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15,'
+        b'"prompt_tokens_details":{"cached_tokens":3}}}\n',
+        b"data: [DONE]\n",
+    ]
+    with patch("urllib.request.urlopen", return_value=_FakeStreamResponse(lines)):
+        chunks = list(
+            handler.streaming(
+                model="test-model",
+                messages=[{"role": "user", "content": "hi"}],
+                api_base="https://example.test/v1",
+                api_key="sk-test",
+                timeout=10,
+                optional_params={},
+                model_response=ModelResponse(),
+            )
+        )
+
+    text_chunks = [chunk["text"] for chunk in chunks if chunk["text"]]
+    assert text_chunks == ["Hello", " world"]
+    final_chunk = chunks[-1]
+    assert final_chunk["is_finished"] is True
+    assert final_chunk["finish_reason"] == "stop"
+    assert final_chunk["usage"]["prompt_tokens"] == 10
+    assert final_chunk["usage"]["prompt_tokens_details"]["cached_tokens"] == 3
+
+
+def test_openai_compatible_client_streams_tokens_via_on_token_callback():
+    lines = [
+        b'data: {"choices":[{"delta":{"content":"1\\n","role":"assistant"},"finish_reason":null,"index":0}]}\n',
+        b'data: {"choices":[{"delta":{"content":"2\\n"},"finish_reason":null,"index":0}]}\n',
+        b'data: {"choices":[{"delta":{},"finish_reason":"stop","index":0}],'
+        b'"usage":{"prompt_tokens":20,"completion_tokens":4,"total_tokens":24}}\n',
+        b"data: [DONE]\n",
+    ]
+    client = OpenAICompatibleModelClient(
+        model="right.codes/codex-mini",
+        base_url="https://right.codes/v1",
+        api_key="sk-test",
+        temperature=0.2,
+        timeout=30,
+    )
+    received = []
+    with patch("urllib.request.urlopen", return_value=_FakeStreamResponse(lines)):
+        result = client.complete("count", 42, on_token=received.append)
+
+    assert received == ["1\n", "2\n"]
+    assert result == {"text": "1\n2\n", "tool_calls": None}
+    assert client.last_completion_metadata["input_tokens"] == 20
+    assert client.last_completion_metadata["total_tokens"] == 24
 
 
 def test_build_agent_uses_openai_provider_and_model_override(tmp_path):
@@ -550,8 +1161,8 @@ def test_successful_run_persists_run_artifacts_and_stop_reason(tmp_path):
     agent = build_agent(
         tmp_path,
         [
-            '<tool>{"name":"read_file","args":{"path":"hello.txt","start":1,"end":2}}</tool>',
-            "<final>Finished.</final>",
+            tool_call("read_file", path="hello.txt", start=1, end=2),
+            final_answer("Finished."),
         ],
     )
 
@@ -589,8 +1200,8 @@ def test_trace_and_report_redact_secret_env_values(tmp_path):
         agent = build_agent(
             tmp_path,
             [
-                '<tool>{"name":"run_shell","args":{"command":"printf \'%s\' \'sk-test-secret-123\'","timeout":20}}</tool>',
-                "<final>Masked.</final>",
+                tool_call("run_shell", command="printf '%s' 'sk-test-secret-123'", timeout=20),
+                final_answer("Masked."),
             ],
         )
 
@@ -620,7 +1231,7 @@ def test_trace_and_report_redact_secret_env_values(tmp_path):
 
 
 def test_prompt_budget_metadata_records_budget_decisions(tmp_path):
-    agent = build_agent(tmp_path, ["<final>Done.</final>"])
+    agent = build_agent(tmp_path, [final_answer("Done.")])
     agent.memory.append_note("alpha episodic note " + ("A" * 120), tags=("recall",), created_at="2026-04-07T10:00:00+00:00")
     agent.memory.append_note("beta episodic recall note " + ("B" * 120), created_at="2026-04-07T10:01:00+00:00")
     agent.memory.append_note("gamma episodic note " + ("C" * 120), tags=("recall",), created_at="2026-04-07T10:02:00+00:00")
@@ -684,7 +1295,7 @@ def test_prompt_metadata_refreshes_prefix_when_workspace_changes(tmp_path):
 
 
 def test_agent_creates_checkpoint_when_context_reduction_happens_and_artifacts_only_reference_it(tmp_path):
-    agent = build_agent(tmp_path, ["<final>Done after checkpoint.</final>"])
+    agent = build_agent(tmp_path, [final_answer("Done after checkpoint.")])
     for index in range(10):
         agent.record(
             {
@@ -732,7 +1343,7 @@ def test_agent_creates_checkpoint_when_context_reduction_happens_and_artifacts_o
 
 
 def test_resume_prompt_uses_checkpoint_state_not_just_history(tmp_path):
-    agent = build_agent(tmp_path, ["<final>checkpoint ready.</final>"])
+    agent = build_agent(tmp_path, [final_answer("checkpoint ready.")])
     agent.session["checkpoints"] = {
         "current_id": "ckpt_manual",
         "items": {
@@ -756,7 +1367,7 @@ def test_resume_prompt_uses_checkpoint_state_not_just_history(tmp_path):
     agent.session_store.save(agent.session)
 
     resumed = CodingForMe.from_session(
-        model_client=FakeModelClient(["<final>Resumed.</final>"]),
+        model_client=FakeModelClient([final_answer("Resumed.")]),
         workspace=build_workspace(tmp_path),
         session_store=agent.session_store,
         session_id=agent.session["id"],
@@ -775,7 +1386,7 @@ def test_resume_prompt_uses_checkpoint_state_not_just_history(tmp_path):
 def test_resume_invalidates_stale_file_summaries_and_marks_partial_stale(tmp_path):
     file_path = tmp_path / "runtime.py"
     file_path.write_text("alpha\n", encoding="utf-8")
-    agent = build_agent(tmp_path, ["<final>checkpoint ready.</final>"])
+    agent = build_agent(tmp_path, [final_answer("checkpoint ready.")])
     agent.memory.set_file_summary("runtime.py", "runtime.py: alpha")
     freshness = agent.memory.to_dict()["file_summaries"]["runtime.py"]["freshness"]
     agent.session["checkpoints"] = {
@@ -802,7 +1413,7 @@ def test_resume_invalidates_stale_file_summaries_and_marks_partial_stale(tmp_pat
     file_path.write_text("beta\n", encoding="utf-8")
 
     resumed = CodingForMe.from_session(
-        model_client=FakeModelClient(["<final>Resumed.</final>"]),
+        model_client=FakeModelClient([final_answer("Resumed.")]),
         workspace=build_workspace(tmp_path),
         session_store=agent.session_store,
         session_id=agent.session["id"],
@@ -834,7 +1445,7 @@ def test_run_shell_nonzero_with_workspace_change_is_recorded_as_partial_success(
 
 
 def test_resume_marks_workspace_mismatch_when_checkpoint_runtime_identity_is_stale(tmp_path):
-    agent = build_agent(tmp_path, ["<final>checkpoint ready.</final>"])
+    agent = build_agent(tmp_path, [final_answer("checkpoint ready.")])
     agent.session["checkpoints"] = {
         "current_id": "ckpt_workspace",
         "items": {
@@ -858,7 +1469,7 @@ def test_resume_marks_workspace_mismatch_when_checkpoint_runtime_identity_is_sta
     agent.session_store.save(agent.session)
 
     resumed = CodingForMe.from_session(
-        model_client=FakeModelClient(["<final>Resumed.</final>"]),
+        model_client=FakeModelClient([final_answer("Resumed.")]),
         workspace=build_workspace(tmp_path),
         session_store=agent.session_store,
         session_id=agent.session["id"],
@@ -873,8 +1484,8 @@ def test_write_file_trace_records_minimum_tool_contract_fields(tmp_path):
     agent = build_agent(
         tmp_path,
         [
-            '<tool>{"name":"write_file","args":{"path":"notes.txt","content":"hello\\n"}}</tool>',
-            "<final>Done.</final>",
+            tool_call("write_file", path="notes.txt", content="hello\n"),
+            final_answer("Done."),
         ],
     )
 
@@ -896,7 +1507,7 @@ def test_write_file_trace_records_minimum_tool_contract_fields(tmp_path):
 
 
 def test_resume_marks_schema_mismatch_when_checkpoint_version_is_incompatible(tmp_path):
-    agent = build_agent(tmp_path, ["<final>checkpoint ready.</final>"])
+    agent = build_agent(tmp_path, [final_answer("checkpoint ready.")])
     agent.session["checkpoints"] = {
         "current_id": "ckpt_schema",
         "items": {
@@ -920,7 +1531,7 @@ def test_resume_marks_schema_mismatch_when_checkpoint_version_is_incompatible(tm
     agent.session_store.save(agent.session)
 
     resumed = CodingForMe.from_session(
-        model_client=FakeModelClient(["<final>Resumed.</final>"]),
+        model_client=FakeModelClient([final_answer("Resumed.")]),
         workspace=build_workspace(tmp_path),
         session_store=agent.session_store,
         session_id=agent.session["id"],
@@ -932,12 +1543,12 @@ def test_resume_marks_schema_mismatch_when_checkpoint_version_is_incompatible(tm
 
 
 def test_resume_marks_no_checkpoint_when_session_has_no_checkpoint_state(tmp_path):
-    agent = build_agent(tmp_path, ["<final>checkpoint ready.</final>"])
+    agent = build_agent(tmp_path, [final_answer("checkpoint ready.")])
     agent.session.pop("checkpoints", None)
     agent.session_store.save(agent.session)
 
     resumed = CodingForMe.from_session(
-        model_client=FakeModelClient(["<final>Resumed.</final>"]),
+        model_client=FakeModelClient([final_answer("Resumed.")]),
         workspace=build_workspace(tmp_path),
         session_store=agent.session_store,
         session_id=agent.session["id"],
@@ -952,7 +1563,7 @@ def test_resume_marks_no_checkpoint_when_session_has_no_checkpoint_state(tmp_pat
 def test_freshness_mismatch_creates_checkpoint_before_model_completion(tmp_path):
     file_path = tmp_path / "runtime.py"
     file_path.write_text("alpha\n", encoding="utf-8")
-    agent = build_agent(tmp_path, ["<final>Resumed.</final>"])
+    agent = build_agent(tmp_path, [final_answer("Resumed.")])
     agent.memory.set_file_summary("runtime.py", "runtime.py: alpha")
     freshness = agent.memory.to_dict()["file_summaries"]["runtime.py"]["freshness"]
     agent.session["checkpoints"] = {
@@ -994,7 +1605,7 @@ def test_runtime_identity_persists_key_execution_metadata(tmp_path):
     workspace = build_workspace(tmp_path)
     store = SessionStore(tmp_path / ".codingforme" / "sessions")
     agent = CodingForMe(
-        model_client=FakeModelClient(["<final>Done.</final>"]),
+        model_client=FakeModelClient([final_answer("Done.")]),
         workspace=workspace,
         session_store=store,
         approval_policy="never",
@@ -1017,7 +1628,7 @@ def test_runtime_identity_persists_key_execution_metadata(tmp_path):
 
 
 def test_resume_records_runtime_identity_mismatch_fields_in_metadata_and_trace(tmp_path):
-    agent = build_agent(tmp_path, ["<final>checkpoint ready.</final>"])
+    agent = build_agent(tmp_path, [final_answer("checkpoint ready.")])
     agent.session["checkpoints"] = {
         "current_id": "ckpt_identity",
         "items": {
@@ -1053,7 +1664,7 @@ def test_resume_records_runtime_identity_mismatch_fields_in_metadata_and_trace(t
     agent.session_store.save(agent.session)
 
     resumed = CodingForMe.from_session(
-        model_client=FakeModelClient(["<final>Resumed.</final>"]),
+        model_client=FakeModelClient([final_answer("Resumed.")]),
         workspace=build_workspace(tmp_path),
         session_store=agent.session_store,
         session_id=agent.session["id"],
@@ -1118,9 +1729,11 @@ def test_explicit_memory_promotion_persists_durable_memory_topics(tmp_path):
     agent = build_agent(
         tmp_path,
         [
-            "<final>Project convention: Use constrained tools instead of guessing.\n"
-            "Project convention: Preserve local agent state under .codingforme/.\n"
-            "Decision: Keep durable memory topic-based and lightweight.</final>",
+            final_answer(
+                "Project convention: Use constrained tools instead of guessing.\n"
+                "Project convention: Preserve local agent state under .codingforme/.\n"
+                "Decision: Keep durable memory topic-based and lightweight."
+            ),
         ],
     )
 
@@ -1153,8 +1766,10 @@ def test_explicit_memory_promotion_supports_chinese_intent_and_labels(tmp_path):
     agent = build_agent(
         tmp_path,
         [
-            "<final>项目约定：优先使用受约束工具，不要靠猜。\n"
-            "决策：持久记忆保持轻量、按 topic 管理。</final>",
+            final_answer(
+                "项目约定：优先使用受约束工具，不要靠猜。\n"
+                "决策：持久记忆保持轻量、按 topic 管理。"
+            ),
         ],
     )
 
@@ -1173,10 +1788,12 @@ def test_explicit_memory_promotion_rejects_secret_shaped_and_transient_lines(tmp
     agent = build_agent(
         tmp_path,
         [
-            "<final>Project convention: Use constrained tools instead of guessing.\n"
-            "Dependency: API key is sk-live-secret-abc.\n"
-            "Decision: Current goal is fix flaky tests.\n"
-            "Dependency: stdout: FAIL test_one FAIL test_two FAIL test_three.</final>",
+            final_answer(
+                "Project convention: Use constrained tools instead of guessing.\n"
+                "Dependency: API key is sk-live-secret-abc.\n"
+                "Decision: Current goal is fix flaky tests.\n"
+                "Dependency: stdout: FAIL test_one FAIL test_two FAIL test_three."
+            ),
         ],
     )
 
@@ -1202,8 +1819,8 @@ def test_explicit_memory_promotion_supersedes_matching_durable_fact(tmp_path):
     agent = build_agent(
         tmp_path,
         [
-            "<final>Dependency: Python runtime is 3.11.</final>",
-            "<final>Dependency: Python runtime is 3.12.</final>",
+            final_answer("Dependency: Python runtime is 3.11."),
+            final_answer("Dependency: Python runtime is 3.12."),
         ],
     )
 
@@ -1225,8 +1842,8 @@ def test_explicit_memory_promotion_dedupes_duplicate_durable_note(tmp_path):
     agent = build_agent(
         tmp_path,
         [
-            "<final>Project convention: Use constrained tools instead of guessing.</final>",
-            "<final>Project convention: Use constrained tools instead of guessing.</final>",
+            final_answer("Project convention: Use constrained tools instead of guessing."),
+            final_answer("Project convention: Use constrained tools instead of guessing."),
         ],
     )
 
@@ -1253,7 +1870,7 @@ def test_agent_records_model_cache_metadata_in_last_prompt_metadata(tmp_path):
     workspace = build_workspace(tmp_path)
     store = SessionStore(tmp_path / ".codingforme" / "sessions")
     agent = CodingForMe(
-        model_client=CacheAwareFakeModelClient(["<final>Done.</final>"]),
+        model_client=CacheAwareFakeModelClient([final_answer("Done.")]),
         workspace=workspace,
         session_store=store,
         approval_policy="auto",
@@ -1269,7 +1886,7 @@ def test_agent_records_model_cache_metadata_in_last_prompt_metadata(tmp_path):
 
 
 def test_recent_transcript_entries_stay_richer_than_older_ones(tmp_path):
-    agent = build_agent(tmp_path, ["<final>Done.</final>"])
+    agent = build_agent(tmp_path, [final_answer("Done.")])
     old_text = "OLD-" + ("A" * 320)
     recent_text = "RECENT-" + ("B" * 320)
 

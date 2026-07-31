@@ -1,3 +1,4 @@
+import copy
 import hashlib
 import json
 import locale as locale_module
@@ -9,7 +10,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from . import memory as memorylib
-from .models import FakeModelClient
+from .models import FakeModelClient, final_answer, tool_call
 from .runtime import CodingForMe, SessionStore
 from .run_store import RunStore
 from .task_state import STOP_REASON_FINAL_ANSWER_RETURNED
@@ -45,60 +46,89 @@ TASK_FIXTURE_ARTIFACTS = {
 
 SCRIPTED_MODEL_OUTPUTS = {
     "readme_intro_locked": [
-        '<tool name="patch_file" path="README.md"><old_text>This is a placeholder benchmark fixture.</old_text><new_text>This fixture is a locked benchmark workspace.</new_text></tool>',
-        "<final>Done.</final>",
+        tool_call(
+            "patch_file",
+            path="README.md",
+            old_text="This is a placeholder benchmark fixture.",
+            new_text="This fixture is a locked benchmark workspace.",
+        ),
+        final_answer("Done."),
     ],
     "readme_schema_note": [
-        '<tool name="patch_file" path="README.md"><old_text>- Placeholder note about the repo.</old_text><new_text>- The benchmark schema and baseline are fixed.</new_text></tool>',
-        "<final>Done.</final>",
+        tool_call(
+            "patch_file",
+            path="README.md",
+            old_text="- Placeholder note about the repo.",
+            new_text="- The benchmark schema and baseline are fixed.",
+        ),
+        final_answer("Done."),
     ],
     "readme_ordering_note": [
-        '<tool name="patch_file" path="README.md"><old_text>- Placeholder note about the file layout.</old_text><new_text>- Deterministic file ordering keeps benchmark diffs stable.</new_text></tool>',
-        "<final>Done.</final>",
+        tool_call(
+            "patch_file",
+            path="README.md",
+            old_text="- Placeholder note about the file layout.",
+            new_text="- Deterministic file ordering keeps benchmark diffs stable.",
+        ),
+        final_answer("Done."),
     ],
     "sample_beta_locked": [
-        '<tool name="patch_file" path="sample.txt"><old_text>beta</old_text><new_text>beta-locked</new_text></tool>',
-        "<final>Done.</final>",
+        tool_call("patch_file", path="sample.txt", old_text="beta", new_text="beta-locked"),
+        final_answer("Done."),
     ],
     "sample_gamma_locked": [
-        '<tool name="patch_file" path="sample.txt"><old_text>gamma</old_text><new_text>gamma-locked</new_text></tool>',
-        "<final>Done.</final>",
+        tool_call("patch_file", path="sample.txt", old_text="gamma", new_text="gamma-locked"),
+        final_answer("Done."),
     ],
     "sample_placeholder_delta": [
-        '<tool name="patch_file" path="sample.txt"><old_text>placeholder</old_text><new_text>delta</new_text></tool>',
-        "<final>Done.</final>",
+        tool_call("patch_file", path="sample.txt", old_text="placeholder", new_text="delta"),
+        final_answer("Done."),
     ],
     "invalid_patch_recovery": [
-        '<tool>{"name":"patch_file","args":{"path":"README.md","old_text":"This is a placeholder benchmark fixture."}}</tool>',
-        '<tool name="patch_file" path="README.md"><old_text>This is a placeholder benchmark fixture.</old_text><new_text>This fixture recovered after invalid patch args.</new_text></tool>',
-        "<final>Done.</final>",
+        # 故意漏掉 new_text：原生协议下这依然是一次结构合法、但业务校验不通过的
+        # 调用，validate_tool() 该挡住它。
+        tool_call("patch_file", path="README.md", old_text="This is a placeholder benchmark fixture."),
+        tool_call(
+            "patch_file",
+            path="README.md",
+            old_text="This is a placeholder benchmark fixture.",
+            new_text="This fixture recovered after invalid patch args.",
+        ),
+        final_answer("Done."),
     ],
     "path_escape_recovery": [
-        '<tool>{"name":"read_file","args":{"path":"../outside.txt","start":1,"end":1}}</tool>',
-        '<tool name="patch_file" path="sample.txt"><old_text>alpha</old_text><new_text>alpha-guarded</new_text></tool>',
-        "<final>Done.</final>",
+        tool_call("read_file", path="../outside.txt", start=1, end=1),
+        tool_call("patch_file", path="sample.txt", old_text="alpha", new_text="alpha-guarded"),
+        final_answer("Done."),
     ],
     "repeated_read_recovery": [
-        '<tool>{"name":"read_file","args":{"path":"sample.txt","start":1,"end":4}}</tool>',
-        '<tool>{"name":"read_file","args":{"path":"sample.txt","start":1,"end":4}}</tool>',
-        '<tool>{"name":"read_file","args":{"path":"sample.txt","start":1,"end":4}}</tool>',
-        '<tool name="patch_file" path="sample.txt"><old_text>placeholder</old_text><new_text>repeat-guarded</new_text></tool>',
-        "<final>Done.</final>",
+        tool_call("read_file", path="sample.txt", start=1, end=4),
+        tool_call("read_file", path="sample.txt", start=1, end=4),
+        tool_call("read_file", path="sample.txt", start=1, end=4),
+        tool_call("patch_file", path="sample.txt", old_text="placeholder", new_text="repeat-guarded"),
+        final_answer("Done."),
     ],
     "context_reduction_checkpoint": [
-        "<final>Done.</final>",
+        final_answer("Done."),
     ],
     "freshness_reanchor_resume": [
-        "<final>Done.</final>",
+        final_answer("Done."),
     ],
     "workspace_mismatch_resume": [
-        "<final>Done.</final>",
+        final_answer("Done."),
     ],
     "durable_promotion_accept": [
-        "<final>Project convention: Preserve benchmark regression artifacts under artifacts/.\nDecision: Keep harness regression deterministic and reproducible.</final>",
+        final_answer(
+            "Project convention: Preserve benchmark regression artifacts under artifacts/.\n"
+            "Decision: Keep harness regression deterministic and reproducible."
+        ),
     ],
     "durable_promotion_reject": [
-        "<final>Project convention: Keep verifier outcomes stable across reruns.\nDependency: API key is sk-benchmark-secret.\nDecision: Current goal is debug the harness.</final>",
+        final_answer(
+            "Project convention: Keep verifier outcomes stable across reruns.\n"
+            "Dependency: API key is sk-benchmark-secret.\n"
+            "Decision: Current goal is debug the harness."
+        ),
     ],
 }
 
@@ -144,7 +174,10 @@ def _scripted_outputs_for_task(task):
     outputs = SCRIPTED_MODEL_OUTPUTS.get(task["id"])
     if outputs is None:
         raise ValueError(f"no scripted model outputs for benchmark task: {task['id']}")
-    return list(outputs)
+    # 深拷贝：脚本化输出现在是嵌套 dict（原生 tool_calls 的形状），而这份表是
+    # 模块级常量、会被多次 run 复用。浅拷贝会让某一次运行里对 args 的改动泄漏到
+    # 后续运行，破坏基准的可复现性。
+    return copy.deepcopy(list(outputs))
 
 
 def _fixture_snapshot_id(fixture_paths):

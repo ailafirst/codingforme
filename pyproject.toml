@@ -4,10 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "coding-for-me"
-version = "0.1.0"
+version = "0.2.0"
 description = "Small local coding agent for OpenAI-compatible chat-completions models"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+  "litellm>=1.60.0",
+]
 
 [project.scripts]
 coding-for-me = "codingforme.cli:main"

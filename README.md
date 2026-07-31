@@ -16,12 +16,14 @@
 - **跑一次性任务。** 重命名、补类型、改配置——一条命令,一次性搞定。
 - **记住上下文。** 关掉再回来,`--resume latest` 接着上次继续。
 
+生成过程是流式的:模型还在想的时候,你就能看到字一个个出来,不用对着空屏幕等。
+
 ## 它不做这些
 
 - 不是聊天框。它的每句话背后都对应一次真实的文件读写或命令执行。
 - 不偷偷跑命令。`run_shell` / `write_file` / `patch_file` 默认每一步都问过你才动手。
 - 不绑定某一家模型。任何 OpenAI 兼容的 `/chat/completions` 端点都能接。
-- 不拖一堆依赖。运行时只用 Python 标准库,装上就能跑。
+- 不拖一堆依赖。运行时只有 `litellm` 一个依赖(为了标准 function-calling 和流式),其余全是标准库。
 
 ---
 
@@ -44,6 +46,13 @@ uv run coding-for-me
 CODINGFORME_OPENAI_API_BASE="https://your-api.example/v1"
 CODINGFORME_OPENAI_API_KEY="your-api-key"
 CODINGFORME_OPENAI_MODEL="your-model"
+```
+
+还有两个可选开关,平时不用管——只在你的后端行为特殊时才需要:
+
+```bash
+CODINGFORME_OPENAI_NATIVE_TOOL_CALLS=0   # 后端不吃标准 tools= 参数时关掉
+CODINGFORME_OPENAI_PROMPT_CACHE_KEY=1    # 后端认 prompt_cache_key 字段时打开
 ```
 
 > 用小米 MiMo?把 base 换成 `https://token-plan-cn.xiaomimimo.com/v1`、模型填 `mimo-v2.5` 就行。
@@ -84,6 +93,7 @@ python -m codingforme                        # 等价的模块入口
 - **危险操作要过闸。** 所有工具调用都先经过一个总闸口,审批策略说了不算就是不算;`patch_file` 还要求 `old_text` 在文件里唯一匹配,改不准就拒绝。
 - **子任务只读。** 它派生出去的子 agent 一律只读、不许审批、步数预算更小——能看不能动。
 - **环境是过滤过的。** `run_shell` 只拿到一份白名单环境变量,密钥名会被脱敏,不会把你的完整 env 漏给子进程。
+- **工具调用走标准协议。** 用的是 OpenAI 标准的 function-calling:工具的参数被翻译成 JSON Schema 一并发给模型,而不是让它在自由文本里"写"一段调用格式。少一层字符串解析,就少一类模型能把调用写歪的方式——实测缺必填参数的调用在协议层就发不出来。
 - **一切留痕。** 每次运行都在 `.codingforme/runs/<run_id>/` 落下 `trace.jsonl`(逐事件追加,跑一半也能看)、`task_state.json`、`report.json`;写进去之前,密钥的值已经换成 `<redacted>`。
 
 会话本身存在 `.codingforme/sessions/`,这些本地产物都被 `.gitignore` 挡在仓库之外。

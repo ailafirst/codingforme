@@ -88,6 +88,29 @@ def _configured_secret_names(args):
     return sorted(configured_secret_names)
 
 
+def _env_flag(name):
+    """把一个可选的布尔环境变量读成 True / False / None。
+
+    None 表示"没配"，交给 models.resolve_capabilities() 的默认值和已知后端表，
+    而不是在这里替用户拍板。
+    """
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return None
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _configured_capabilities():
+    """从环境变量读后端能力覆盖。
+
+    这样接一个新后端是改配置，不是改 models.py 里的 host 白名单。
+    """
+    return {
+        "native_tool_calls": _env_flag("CODINGFORME_OPENAI_NATIVE_TOOL_CALLS"),
+        "prompt_cache_key": _env_flag("CODINGFORME_OPENAI_PROMPT_CACHE_KEY"),
+    }
+
+
 def _build_model_client(args):
     model = _effective_model(args)
     base_url = getattr(args, "base_url", None) or provider_env("CODINGFORME_OPENAI_API_BASE", ("OPENAI_API_BASE",), DEFAULT_OPENAI_BASE_URL)
@@ -98,6 +121,7 @@ def _build_model_client(args):
         api_key=api_key,
         temperature=args.temperature,
         timeout=getattr(args, "openai_timeout", 300),
+        capabilities=_configured_capabilities(),
     )
 
 
@@ -277,7 +301,7 @@ def build_welcome(agent, model, color=False):
     return "\n".join(rows)
 
 
-def build_agent(args):
+def build_agent(args, on_token=None):
     """根据 CLI 参数装配出一个可运行的 CodingForMe 实例。
 
     为什么存在：
@@ -313,6 +337,7 @@ def build_agent(args):
             max_steps=args.max_steps,
             max_new_tokens=args.max_new_tokens,
             secret_env_names=configured_secret_names,
+            on_token=on_token,
         )
     return CodingForMe(
         model_client=model,
@@ -322,6 +347,7 @@ def build_agent(args):
         max_steps=args.max_steps,
         max_new_tokens=args.max_new_tokens,
         secret_env_names=configured_secret_names,
+        on_token=on_token,
     )
 
 
@@ -356,13 +382,18 @@ def build_arg_parser():
 
 def main(argv=None):
     args = build_arg_parser().parse_args(argv)
-    agent = build_agent(args)
-
     use_color = _supports_color()
+    pal = _welcome_palette(use_color)
+
+    def on_token(text):
+        # 模型还在流式生成时的实时预览：用暗色打印，和后面 show() 渲染的
+        # 最终圆角框答案区分开，避免看起来像是同一段内容被打印了两遍。
+        print(f"{pal['dim']}{text}{pal['reset']}", end="", flush=True)
+
+    agent = build_agent(args, on_token=on_token)
+
     model = getattr(agent.model_client, "model", DEFAULT_OPENAI_MODEL)
     print(build_welcome(agent, model=model, color=use_color))
-
-    pal = _welcome_palette(use_color)
     # 输入提示符：始终在屏幕上的一段 UI chrome，配合每轮回答的框，
     # 让对话过程中圆角框风格不会“滚一会儿就消失”。
     prompt_str = f"\n{pal['accent']}❯{pal['reset']} "
