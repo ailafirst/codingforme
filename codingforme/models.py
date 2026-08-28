@@ -39,10 +39,42 @@ def final_answer(text):
     return {"text": str(text), "tool_calls": None}
 
 
+def to_messages(messages):
+    """把 `complete()` 的第一个参数归一成标准 messages 数组。
+
+    字符串是**便利形式**而不是第二套协议：线上永远发数组，这里只是让直接调
+    `complete("...")` 的测试和脚本不必手工包一层。
+    """
+    if isinstance(messages, str):
+        return [{"role": "user", "content": messages}]
+    return [dict(message) for message in messages]
+
+
+def flatten_messages(messages):
+    """messages 数组 → 纯文本视图。
+
+    只服务于观测与断言（FakeModelClient 的 `prompts`、trace 里的可读快照），
+    **不用于发请求**。工具调用渲染成 `[tool:name] {args}`，和 `ContextManager`
+    压平历史时的写法一致，这样"某段文字在不在上下文里"这类断言换了载体也照旧成立。
+    """
+    if isinstance(messages, str):
+        return messages
+    blocks = []
+    for message in messages:
+        content = str(message.get("content") or "")
+        if content:
+            blocks.append(content)
+        for call in message.get("tool_calls") or []:
+            function = call.get("function", {}) or {}
+            blocks.append(f"[tool:{function.get('name', '')}] {function.get('arguments', '')}")
+    return "\n\n".join(blocks)
+
+
 class FakeModelClient:
     def __init__(self, outputs, supports_native_tool_calls=True):
         self.outputs = list(outputs)
         self.prompts = []
+        self.messages = []
         self.supports_prompt_cache = False
         # 默认按原生 function-calling 走，和真实后端一致——脚本化输出用
         # tool_call()/final_answer() 构造。传 False 只表示"这个后端不吃 tools="，
@@ -51,8 +83,12 @@ class FakeModelClient:
         self.pending_tool_choice = None
         self.last_completion_metadata = {}
 
-    def complete(self, prompt, max_new_tokens, **kwargs):
-        self.prompts.append(prompt)
+    def complete(self, messages, max_new_tokens, **kwargs):
+        # 两份记录各有用处：`messages` 是真正发出去的结构，断言"这一轮以 assistant
+        # 身份重放了哪几个 tool_call"只能查它；`prompts` 是压平的文本视图，
+        # 断言"某段文字在不在上下文里"用它更直接，也让既有用例不必全部重写。
+        self.messages.append(to_messages(messages))
+        self.prompts.append(flatten_messages(messages))
         if not getattr(self, "last_completion_metadata", None):
             self.last_completion_metadata = {}
         if not self.outputs:
@@ -250,13 +286,48 @@ def _extract_usage_cache_details(data):
     output_tokens = usage.get("output_tokens", usage.get("completion_tokens"))
     input_details = usage.get("input_tokens_details") or usage.get("prompt_tokens_details") or {}
     cached_tokens = int(input_details.get("cached_tokens") or 0)
+    # 推理模型把思维链的开销记在 completion_tokens_details.reasoning_tokens 里，
+    # 且它**已经计入** output_tokens。不单独取出来会有两个后果：
+    #   1. 成本被严重低估——实测 MiMo 一次简单收尾 115 个输出 token 里有 92 个是思维链；
+    #   2. 看不出 max_new_tokens 是被思维链吃光的，只会看到"content 莫名其妙是空的"。
+    output_details = usage.get("output_tokens_details") or usage.get("completion_tokens_details") or {}
+    reasoning_tokens = int(output_details.get("reasoning_tokens") or 0)
     return {
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
+        "reasoning_tokens": reasoning_tokens,
         "total_tokens": usage.get("total_tokens"),
         "cached_tokens": cached_tokens,
         "cache_hit": cached_tokens > 0,
     }
+
+
+# 网关把**自己这一侧的连接失败**当成 4xx 报出来时，响应体里会留下这些痕迹。
+# 按状态码判定的话它是"客户端请求有问题"（不可重试），按语义则是一次典型的
+# 上游抖动（应当重试）。踩过的坑：一次 2.4 小时的 k=3 跑批在第三轮第 10 个任务
+# 上收到 `HTTP 400 {"message":"Request failed","param":"finishConnect(..) failed:
+# Connection refused: ...10.137.1.77:80"}` —— 那个 IP 是**服务端内网地址**，
+# 和我们发的请求没有关系。当时按 400 直接放弃，整轮跑批连同已完成的部分一起丢了。
+_TRANSPORT_FAILURE_MARKERS = (
+    "connection refused",
+    "connection reset",
+    "connection timed out",
+    "connect timed out",
+    "finishconnect",
+    "no route to host",
+    "broken pipe",
+    "upstream connect error",
+)
+
+
+def _is_transport_failure_body(body):
+    """这个 4xx 是不是网关在替上游报连接失败。
+
+    刻意只认连接类痕迹，**不放宽成"所有 400 都重试"**：真正的请求格式错误
+    （我们自己的 bug）重试三次只会白烧三个约 17 秒的往返，还把错误现场推迟。
+    """
+    lowered = str(body).lower()
+    return any(marker in lowered for marker in _TRANSPORT_FAILURE_MARKERS)
 
 
 def _send_with_retry(request, timeout, model, attempts=3):
@@ -274,8 +345,11 @@ def _send_with_retry(request, timeout, model, attempts=3):
             return body_text, content_type
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
-            if exc.code >= 500 and attempt < attempts - 1:
-                time.sleep(0.5 * (attempt + 1))
+            # 4xx 里混着的连接类失败与 5xx 同类处理，但退避拉长：上游抖动恢复
+            # 通常以秒计，0.5 秒重试大概率撞在同一次故障窗口里。
+            transport_failure = exc.code < 500 and _is_transport_failure_body(body)
+            if (exc.code >= 500 or transport_failure) and attempt < attempts - 1:
+                time.sleep((2.0 if transport_failure else 0.5) * (attempt + 1))
                 continue
             raise RuntimeError(f"OpenAI-compatible request failed with HTTP {exc.code}: {body}") from exc
         except (urllib.error.URLError, RemoteDisconnected) as exc:
@@ -298,15 +372,26 @@ def _usage_dict_from_object(usage_obj):
     if isinstance(usage_obj, dict):
         get = usage_obj.get
         details = usage_obj.get("prompt_tokens_details")
+        out_details = usage_obj.get("completion_tokens_details")
     else:
         get = lambda key, default=None: getattr(usage_obj, key, default)  # noqa: E731
         details = getattr(usage_obj, "prompt_tokens_details", None)
+        out_details = getattr(usage_obj, "completion_tokens_details", None)
     cached_tokens = 0
     if details is not None:
         cached_tokens = details.get("cached_tokens") if isinstance(details, dict) else getattr(details, "cached_tokens", None)
+    # 思维链的开销：它**已经计入** completion_tokens，但不单独取出来就看不见。
+    # 见 _extract_usage_cache_details 里同一处注释。
+    reasoning_tokens = 0
+    if out_details is not None:
+        reasoning_tokens = (
+            out_details.get("reasoning_tokens") if isinstance(out_details, dict)
+            else getattr(out_details, "reasoning_tokens", None)
+        )
     return {
         "prompt_tokens": get("prompt_tokens"),
         "completion_tokens": get("completion_tokens"),
+        "reasoning_tokens": int(reasoning_tokens or 0),
         "total_tokens": get("total_tokens"),
         "cached_tokens": int(cached_tokens or 0),
     }
@@ -413,6 +498,10 @@ class _CompatBackendCustomLLM(CustomLLM):
                 completion_tokens=usage.get("output_tokens") or 0,
                 total_tokens=usage.get("total_tokens") or 0,
                 prompt_tokens_details={"cached_tokens": usage.get("cached_tokens") or 0},
+                # 思维链开销要一路带到 last_completion_metadata。漏掉这一项的后果不是
+                # 少个字段，而是成本被系统性低估——它是 completion_tokens 的一部分，
+                # 实测能占到输出的八成。
+                completion_tokens_details={"reasoning_tokens": usage.get("reasoning_tokens") or 0},
             )
         return model_response
 
@@ -584,7 +673,7 @@ class OpenAICompatibleModelClient:
             if item.get("provider") != self._provider_name
         ] + [{"provider": self._provider_name, "custom_handler": _CompatBackendCustomLLM()}]
 
-    def complete(self, prompt, max_new_tokens, prompt_cache_key=None, prompt_cache_retention=None, tools=None, on_token=None):
+    def complete(self, messages, max_new_tokens, prompt_cache_key=None, prompt_cache_retention=None, tools=None, on_token=None):
         """向 OpenAI-compatible 后端发起一次模型调用，经由 litellm 传输。
 
         为什么存在：
@@ -594,7 +683,9 @@ class OpenAICompatibleModelClient:
         `complete()` 行为。
 
         输入 / 输出：
-        - 输入：完整 prompt、最大输出 token、可选的 prompt cache 参数、
+        - 输入：标准 messages 数组（system / user / assistant 带 tool_calls /
+          tool 带 tool_call_id；传字符串则包成单条 user message）、
+          最大输出 token、可选的 prompt cache 参数、
           可选的 `tools`（`tools.to_openai_function_specs()` 产出的标准
           function-calling schema 列表）、可选的 `on_token` 回调（传入时走
           SSE 流式，每个文本增量都会实时回调；不传时走一次性非流式请求）。
@@ -616,7 +707,7 @@ class OpenAICompatibleModelClient:
 
         kwargs = {
             "model": f"{self._provider_name}/{self.model}",
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": to_messages(messages),
             "api_base": self.base_url,
             "api_key": self.api_key,
             "max_tokens": max_new_tokens,
@@ -656,6 +747,10 @@ class OpenAICompatibleModelClient:
             # 为假是完全正常的——说明后端在做自动前缀缓存，只是不认我们的 key。
             "input_tokens": usage.get("prompt_tokens"),
             "output_tokens": usage.get("completion_tokens"),
+            # 思维链 token。它是 output_tokens 的一部分，不是额外的。
+            # reasoning_tokens 接近 max_new_tokens 时，说明额度在推理阶段就被吃光、
+            # content 根本没轮到写——那一轮会被 parse() 归约成 retry。
+            "reasoning_tokens": int(usage.get("reasoning_tokens") or 0),
             "total_tokens": usage.get("total_tokens"),
             "cached_tokens": cached_tokens,
             "cache_hit": cached_tokens > 0,
