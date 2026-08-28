@@ -21,4 +21,4 @@ dev = [
 ]
 
 [tool.setuptools]
-packages = ["codingforme"]
+packages = ["codingforme", "codingforme.eval"]

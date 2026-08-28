@@ -1,0 +1,108 @@
+{
+  "schema_version": 1,
+  "source": "benchmarks/session_tasks.json",
+  "description": "L3 跨会话基准：一条会话内连续多次 ask()，检验 harness 有没有把先前建立的事实重新放回 prompt。题型分类沿用 LongMemEval 的四类。",
+  "evaluated_object": "harness",
+  "notes": [
+    "评的是「控制循环有没有把证据带回上下文」，不是「模型有没有答对」——脚本化模型不真的读 prompt，问后者没有意义，而前者恰好是 harness 的职责。",
+    "召回靠 memory.py 的 _tokenize（正则 [A-Za-z0-9_]+），中文不产生 token，所以事实与提问的关键词一律用英文；中文只出现在描述里。",
+    "notes_exclude 是必需的：只断言「命中了」而不断言「没多带」，把所有笔记原样倒进 prompt 也能通过。"
+  ],
+  "tasks": [
+    {
+      "id": "recall_build_command",
+      "question_type": "single_session_recall",
+      "description": "第一轮建立一条约定，第二轮换个问法要回来。最基本的单会话事实召回。",
+      "turns": [
+        {
+          "request": "Please remember this: the build command is uv run pytest.",
+          "outputs": [{"final": "Project convention: the build command is uv run pytest."}]
+        },
+        {
+          "request": "What build command should I use for this project?",
+          "outputs": [{"final": "Use uv run pytest."}],
+          "expect": {"notes_contain": ["uv run pytest"], "min_notes": 1}
+        }
+      ]
+    },
+    {
+      "id": "aggregate_lint_and_dependency",
+      "question_type": "cross_session_aggregation",
+      "description": "三轮各建立一条不同主题的事实，第四轮的提问同时涉及其中两条。考察召回的选择性：既要带回相关的两条，也不能把无关的第三条一起倒进来。",
+      "turns": [
+        {
+          "request": "Please remember: lint runs with ruff check.",
+          "outputs": [{"final": "Project convention: lint runs with ruff check."}]
+        },
+        {
+          "request": "Please remember: the runtime depends on litellm only.",
+          "outputs": [{"final": "Dependency: the runtime depends on litellm only."}]
+        },
+        {
+          "request": "Please remember: architecture reports are written in Chinese.",
+          "outputs": [{"final": "Preference: architecture reports are written in Chinese."}]
+        },
+        {
+          "request": "Before I open a PR, what does lint run and which runtime dependency is allowed?",
+          "outputs": [{"final": "Lint is ruff check; the only runtime dependency is litellm."}],
+          "expect": {
+            "notes_contain": ["ruff check", "litellm"],
+            "notes_exclude": ["architecture reports"],
+            "min_notes": 2
+          }
+        }
+      ]
+    },
+    {
+      "id": "update_indentation_convention",
+      "question_type": "knowledge_update",
+      "description": "同一主题先说 4 空格、隔一轮改成 2 空格。最强的一条：既要带回新值，又必须证明旧值真的被覆盖掉了（durable store 的 supersede 语义）。",
+      "turns": [
+        {
+          "request": "Please remember: indentation is 4 spaces.",
+          "outputs": [{"final": "Project convention: indentation is 4 spaces."}]
+        },
+        {
+          "request": "Please remember: the changelog is written in Chinese.",
+          "outputs": [{"final": "Preference: the changelog is written in Chinese."}]
+        },
+        {
+          "request": "We changed our mind. Please remember: indentation is 2 spaces.",
+          "outputs": [{"final": "Project convention: indentation is 2 spaces."}],
+          "expect": {"superseded": true}
+        },
+        {
+          "request": "What indentation does this project use?",
+          "outputs": [{"final": "2 spaces."}],
+          "expect": {
+            "notes_contain": ["2 spaces"],
+            "notes_exclude": ["4 spaces"],
+            "min_notes": 1
+          }
+        }
+      ]
+    },
+    {
+      "id": "recall_release_tag_across_restarts",
+      "question_type": "temporal_reasoning",
+      "description": "每一轮之间都重建 agent 实例，模拟进程重启后 --resume。考察会话时间线本身能否重建：run_seq 必须跨进程边界继续递增，而不是归零。",
+      "turns": [
+        {
+          "request": "Please remember: the release tag is v0.2.0.",
+          "outputs": [{"final": "Decision: release tag is v0.2.0."}]
+        },
+        {
+          "request": "Please remember: the next milestone is eval-p1.",
+          "outputs": [{"final": "Decision: milestone is eval-p1."}],
+          "restart_before": true
+        },
+        {
+          "request": "Which release tag did we pick?",
+          "outputs": [{"final": "v0.2.0."}],
+          "restart_before": true,
+          "expect": {"notes_contain": ["v0.2.0"], "min_notes": 1}
+        }
+      ]
+    }
+  ]
+}
