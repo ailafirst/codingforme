@@ -1,7 +1,10 @@
+import io
 import os
+import re
 import json
 import subprocess
 import sys
+import urllib.error
 from pathlib import Path
 from unittest.mock import patch
 
@@ -17,7 +20,14 @@ from codingforme import (
     WorkspaceContext,
     build_welcome,
 )
-from codingforme.models import _CompatBackendCustomLLM, final_answer, force_tool_choice, tool_call
+from codingforme.models import (
+    _CompatBackendCustomLLM,
+    _send_with_retry,
+    final_answer,
+    force_tool_choice,
+    tool_call,
+)
+from codingforme import tools as toolkit
 from codingforme.tools import to_openai_function_specs
 
 
@@ -61,6 +71,54 @@ def test_agent_runs_tool_then_final(tmp_path):
     assert answer == "Read the file successfully."
     assert any(item["role"] == "tool" and item["name"] == "read_file" for item in agent.session["history"])
     assert "hello.txt" in agent.session["memory"]["files"]
+
+
+def test_model_narration_on_a_tool_turn_is_kept_in_history(tmp_path):
+    """工具轮里模型说的话必须留在 history，而且排在那次工具结果前面。
+
+    为什么这条重要：不留的话，模型下一轮只看得见一串工具结果，看不见自己
+    当时打算干什么、已经确认过什么，于是反复回读同一个文件。实测一次真实
+    运行里 15 次模型调用有 9 次是这种重复劳动。
+    """
+    (tmp_path / "hello.txt").write_text("alpha\n", encoding="utf-8")
+    call = tool_call("read_file", path="hello.txt")
+    call["text"] = "Checking hello.txt before I decide what to patch."
+    agent = build_agent(tmp_path, [call, final_answer("Done.")])
+
+    agent.ask("Inspect hello.txt")
+
+    roles = [item["role"] for item in agent.session["history"]]
+    contents = [str(item.get("content", "")) for item in agent.session["history"]]
+    assert "Checking hello.txt before I decide what to patch." in contents
+    narration_index = contents.index("Checking hello.txt before I decide what to patch.")
+    tool_index = next(i for i, item in enumerate(agent.session["history"]) if item["role"] == "tool")
+    assert roles[narration_index] == "assistant"
+    assert narration_index < tool_index, "说明文字要排在它导致的那次工具结果之前"
+
+
+def test_a_tool_turn_without_narration_costs_no_history_budget(tmp_path):
+    """模型没说话时，那条 assistant 记录不能占用 history 的文本预算。
+
+    这条断言在改用标准 messages 数组时换了形状。原来的写法是「history 里不许有
+    空内容的条目」，因为空条目当时纯属浪费预算。现在这条记录还承载着「这一轮发了
+    哪几个调用」这个结构事实，messages 组装要靠它把工具结果配回发起它的那一轮，
+    所以条目本身必须留下——**要守的是"不占文本预算"，不是"不存在"**。
+    """
+    (tmp_path / "hello.txt").write_text("alpha\n", encoding="utf-8")
+    agent = build_agent(
+        tmp_path,
+        [tool_call("read_file", path="hello.txt"), final_answer("Done.")],
+    )
+
+    agent.ask("Inspect hello.txt")
+
+    for item in agent.session["history"]:
+        if str(item.get("content", "")).strip():
+            continue
+        assert item.get("tool_calls"), "空内容的条目只有在承载 tool_calls 时才允许存在"
+    # 文本视图里不能出现内容为空的 assistant 行（"[assistant] " 后面什么都没有）。
+    for view in (agent.prompt("next"), agent.history_text()):
+        assert not [line for line in view.splitlines() if line.rstrip() == "[assistant]"]
 
 
 def test_agent_updates_task_summary_on_each_request(tmp_path):
@@ -278,8 +336,56 @@ def test_patch_file_replaces_exact_match(tmp_path):
         },
     )
 
-    assert result == "patched sample.txt"
+    # 返回值不止确认「改了」，还要回显改完之后那一段长什么样——否则模型只能
+    # 靠再读一次文件来验证，那是一整个模型往返的代价。格式与 read_file 一致。
+    assert result.splitlines()[0] == "patched sample.txt"
+    assert "   1: hello agent" in result
     assert file_path.read_text(encoding="utf-8") == "hello agent\n"
+
+
+def test_patch_file_excerpt_shows_the_new_text_with_context(tmp_path):
+    """回显必须覆盖到改动的全部行，并带上前后各两行上下文。
+
+    只回显首行的话，多行 new_text 里除第一行外都看不见，模型照样要回读。
+    """
+    file_path = tmp_path / "CHANGELOG.md"
+    file_path.write_text("# Changelog\n\n## Unreleased\n\n## 1.0\n- first\n", encoding="utf-8")
+    agent = build_agent(tmp_path, [])
+
+    result = agent.run_tool(
+        "patch_file",
+        {
+            "path": "CHANGELOG.md",
+            "old_text": "## Unreleased",
+            "new_text": "## Unreleased\n- Changed default PORT from 8080 to 9090",
+        },
+    )
+
+    # 补丁后文件是 7 行；改动落在第 3~4 行，前后各两行 → 窗口是第 1~6 行。
+    assert "   1: # Changelog" in result
+    assert "   3: ## Unreleased" in result
+    assert "   4: - Changed default PORT from 8080 to 9090" in result
+    assert "   6: ## 1.0" in result
+    assert "- first" not in result, "窗口外的第 7 行不该被带出来"
+
+
+def test_patch_file_excerpt_is_capped_so_a_huge_patch_cannot_flood_the_prompt(tmp_path):
+    """回显有上限：它是给模型看的确认，不是文件回放。"""
+    file_path = tmp_path / "big.txt"
+    file_path.write_text("anchor\n", encoding="utf-8")
+    agent = build_agent(tmp_path, [])
+
+    result = agent.run_tool(
+        "patch_file",
+        {
+            "path": "big.txt",
+            "old_text": "anchor",
+            "new_text": "\n".join(f"line {i}" for i in range(200)),
+        },
+    )
+
+    assert "excerpt truncated" in result
+    assert len(result.splitlines()) <= 45
 
 
 def test_invalid_risky_tool_does_not_prompt_for_approval(tmp_path):
@@ -315,7 +421,10 @@ def test_repeated_identical_tool_call_is_rejected(tmp_path):
 
     result = agent.run_tool("list_files", {})
 
-    assert result == "error: repeated identical tool call for list_files; choose a different tool or return a final answer"
+    # 措辞要在「跨轮反复发同一调用」和「同一轮内发了三遍」两种场景下都读得通，
+    # 并且按 P5 给出下一步该做什么，而不只是宣布失败。
+    assert result.startswith("error: list_files was already called twice")
+    assert "Use different arguments, a different tool, or return a final answer." in result
 
 
 def test_welcome_screen_keeps_box_shape_for_long_paths(tmp_path):
@@ -344,6 +453,62 @@ def test_welcome_screen_keeps_box_shape_for_long_paths(tmp_path):
     assert "(  o o  )" not in welcome
     assert "coding for me" not in welcome
     assert "calm shell" not in welcome
+
+
+def test_welcome_survives_a_terminal_that_cannot_encode_its_glyphs(tmp_path, monkeypatch):
+    """GBK 终端下横幅必须能打印出来，而不是让进程崩在打招呼这一步。
+
+    这是实测撞到的：Windows 默认控制台是 GBK，横幅里的 `✦`(U+2726) 编不出来，
+    `python -m codingforme` 直接抛 UnicodeEncodeError，agent 根本起不来。
+    横幅只是最先撞上的，模型答案里带 emoji 一样会打断整个 REPL。
+    """
+    import io
+
+    from codingforme.cli import _make_output_resilient, _terminal_safe
+
+    agent = build_agent(tmp_path, [])
+    welcome = build_welcome(agent, model="qwen3.5:4b")
+
+    gbk_console = io.TextIOWrapper(io.BytesIO(), encoding="gbk", newline="")
+    monkeypatch.setattr("sys.stdout", gbk_console)
+
+    # 改动前这一行就是崩溃点。
+    safe = _terminal_safe(welcome)
+    safe.encode("gbk")  # 装饰字符全部降级成 ASCII，GBK 写得出来
+
+    for fancy, plain in (("✦", "*"), ("✻", "*"), ("❯", ">"), ("‿", "_")):
+        assert fancy not in safe
+        assert plain in safe or fancy not in welcome
+    # 框线和中文不受影响：GBK 编得出来的字符一个都不该被换掉。
+    assert "╭" in safe and "│" in safe
+
+    # errors="replace" 兜住无法预先枚举的内容（比如模型输出里的 emoji）。
+    _make_output_resilient()
+    gbk_console.write("模型回答里带了一个 🚀\n")
+    gbk_console.flush()
+    decoded = gbk_console.buffer.getvalue().decode("gbk")
+    assert "模型回答里带了一个" in decoded, "中文必须原样保留，只有编不出的字符降级"
+
+
+def test_dotenv_is_read_from_the_codingforme_repo_not_the_workspace(tmp_path):
+    """`.env` 一律从本仓库找，与 --cwd 指向哪里无关。
+
+    改动前 cli 用的是 `load_project_env(workspace.repo_root)`：工作区在仓库外面时
+    （拿 agent 去改别的项目就是这种情况）往上走永远找不到本仓库的 `.env`，实测载入
+    0 个键。它看着能用只是因为 `import litellm` 会顺手 `load_dotenv()` 读进程 cwd
+    ——配置实际是第三方副作用喂进来的，换个目录启动就报缺凭证。
+    """
+    from codingforme.config import find_project_env, project_root
+
+    repo = project_root()
+    assert (repo / "codingforme" / "cli.py").is_file(), "project_root 必须指向本仓库根目录"
+
+    # 工作区在仓库外：它自己往上找不到任何 .env，但 project_root() 能。
+    outside = tmp_path / "some" / "other" / "project"
+    outside.mkdir(parents=True)
+    assert find_project_env(outside) is None
+    if (repo / ".env").exists():
+        assert find_project_env(repo) == repo / ".env"
 
 
 
@@ -535,16 +700,45 @@ def test_openai_compatible_client_extracts_text_from_event_stream_deltas():
 def test_parse_accepts_native_tool_call():
     kind, payload = CodingForMe.parse({"text": "", "tool_calls": [{"name": "list_files", "args": {"path": "."}}]})
     assert kind == "tool"
-    assert payload == {"name": "list_files", "args": {"path": "."}}
+    # payload 恒为列表，单个调用也不例外——ask() 因此只有一种处理路径。
+    assert payload == [{"name": "list_files", "args": {"path": "."}}]
 
 
-def test_parse_rejects_more_than_one_native_tool_call():
+def test_parse_accepts_more_than_one_native_tool_call():
+    """一轮多个调用是合法输入，按顺序全部返回。
+
+    这里以前断言 retry：多于一个就把整轮判废重来。放弃那个做法是因为代价不对称——
+    这个后端实测会一轮发 3~4 个（同一提示 5 次里有 3 次），`parallel_tool_calls: false`
+    它又不理会，于是每次都白烧一个约 17 秒的固定往返，还把本可一轮做完的事拆成多轮。
+    """
     kind, payload = CodingForMe.parse(
         {
             "text": "",
             "tool_calls": [
                 {"name": "list_files", "args": {"path": "."}},
                 {"name": "read_file", "args": {"path": "README.md"}},
+            ],
+        }
+    )
+    assert kind == "tool"
+    assert payload == [
+        {"name": "list_files", "args": {"path": "."}},
+        {"name": "read_file", "args": {"path": "README.md"}},
+    ]
+
+
+def test_parse_retries_when_any_call_in_a_batch_is_malformed():
+    """一批里只要有一个形状不合法，整批走 retry。
+
+    不做「跳过坏的、执行好的」：模型发的是一组有先后关系的动作，静默丢掉中间一个
+    会让后面几个建立在错误前提上，而模型完全看不出发生过这件事。
+    """
+    kind, _ = CodingForMe.parse(
+        {
+            "text": "",
+            "tool_calls": [
+                {"name": "list_files", "args": {"path": "."}},
+                {"name": "", "args": {}},
             ],
         }
     )
@@ -566,7 +760,7 @@ def test_parse_falls_back_to_text_tags_when_no_native_tool_calls():
     # dict 里 tool_calls 是 None/空，走原来的文本标签兜底解析。
     kind, payload = CodingForMe.parse({"text": '<tool>{"name":"list_files","args":{"path":"."}}</tool>', "tool_calls": None})
     assert kind == "tool"
-    assert payload == {"name": "list_files", "args": {"path": "."}}
+    assert payload == [{"name": "list_files", "args": {"path": "."}}]
 
     kind, final = CodingForMe.parse({"text": "<final>plain text answer</final>", "tool_calls": []})
     assert kind == "final"
@@ -583,6 +777,174 @@ def test_agent_executes_native_tool_call_end_to_end(tmp_path):
         ],
     )
     assert agent.ask("list the files") == "Done."
+
+
+def test_agent_executes_every_call_of_a_multi_call_turn_in_order(tmp_path):
+    """一轮发三个调用，三个都要执行，顺序不变，各自计一步。"""
+    (tmp_path / "a.txt").write_text("alpha\n", encoding="utf-8")
+    (tmp_path / "b.txt").write_text("beta\n", encoding="utf-8")
+    (tmp_path / "c.txt").write_text("gamma\n", encoding="utf-8")
+    agent = build_agent(
+        tmp_path,
+        [
+            {
+                "text": "Reading all three.",
+                "tool_calls": [
+                    {"name": "read_file", "args": {"path": "a.txt"}},
+                    {"name": "read_file", "args": {"path": "b.txt"}},
+                    {"name": "read_file", "args": {"path": "c.txt"}},
+                ],
+            },
+            {"text": "Done.", "tool_calls": None},
+        ],
+    )
+
+    assert agent.ask("read a, b and c") == "Done."
+
+    tool_entries = [item for item in agent.session["history"] if item["role"] == "tool"]
+    assert [item["args"]["path"] for item in tool_entries] == ["a.txt", "b.txt", "c.txt"]
+    assert "alpha" in tool_entries[0]["content"]
+    assert "gamma" in tool_entries[2]["content"]
+    # 模型那轮的说明文字排在三条结果之前，只记一次而不是每个调用记一次
+    assert [item["content"] for item in agent.session["history"] if item["role"] == "assistant"].count("Reading all three.") == 1
+
+
+def test_a_failing_call_does_not_stop_the_rest_of_the_batch(tmp_path):
+    """批次里一个调用失败，后面的照常执行——失败以字符串反馈，不抛异常。"""
+    (tmp_path / "ok.txt").write_text("fine\n", encoding="utf-8")
+    agent = build_agent(
+        tmp_path,
+        [
+            {
+                "text": "",
+                "tool_calls": [
+                    {"name": "read_file", "args": {"path": "../escape.txt"}},
+                    {"name": "read_file", "args": {"path": "ok.txt"}},
+                ],
+            },
+            {"text": "Done.", "tool_calls": None},
+        ],
+    )
+
+    assert agent.ask("read both") == "Done."
+
+    tool_entries = [item for item in agent.session["history"] if item["role"] == "tool"]
+    assert len(tool_entries) == 2
+    assert "escapes workspace" in tool_entries[0]["content"]
+    assert "fine" in tool_entries[1]["content"]
+
+
+def test_step_budget_stops_a_batch_midway_and_tells_the_model_which_calls_were_skipped(tmp_path):
+    """预算在批次中途用完时，剩下的不执行，而且要明确告诉模型哪些没跑。
+
+    静默丢弃是不行的：模型会以为那些调用都做过了，下一轮基于错误前提继续。
+    """
+    for name in ["a.txt", "b.txt", "c.txt"]:
+        (tmp_path / name).write_text(name, encoding="utf-8")
+    agent = build_agent(
+        tmp_path,
+        [
+            {
+                "text": "",
+                "tool_calls": [
+                    {"name": "read_file", "args": {"path": "a.txt"}},
+                    {"name": "read_file", "args": {"path": "b.txt"}},
+                    {"name": "read_file", "args": {"path": "c.txt"}},
+                ],
+            },
+            {"text": "Done.", "tool_calls": None},
+        ],
+        max_steps=2,
+    )
+
+    agent.ask("read all three")
+
+    # 每个调用都要有紧跟其后的结果——**包括没执行的那个**。以前这里写的是一条
+    # 汇总通知，模型得自己把「哪条结果属于哪个调用」推理出来。
+    tool_entries = [item for item in agent.session["history"] if item["role"] == "tool"]
+    assert [item["args"]["path"] for item in tool_entries] == ["a.txt", "b.txt", "c.txt"]
+    assert [item.get("executed", True) for item in tool_entries] == [True, True, False]
+    assert "not executed" in tool_entries[2]["content"]
+    assert "Re-issue this call" in tool_entries[2]["content"], "要告诉模型下一步该做什么"
+    # 没执行的调用不占步数，也不能进任务状态。
+    assert agent.current_task_state.tool_steps == 2
+
+
+def test_an_unexecuted_call_is_traced_as_skipped_not_executed(tmp_path):
+    """没跑的调用写 `tool_skipped`。
+
+    混进 `tool_executed` 会让 `calls_per_turn` 以及所有 L1 断言把没跑的调用
+    算成跑了——而那种漏算在报告里长得和正常数据一模一样。
+    """
+    for name in ["a.txt", "b.txt", "c.txt"]:
+        (tmp_path / name).write_text(name, encoding="utf-8")
+    agent = build_agent(
+        tmp_path,
+        [
+            {
+                "text": "",
+                "tool_calls": [
+                    {"name": "read_file", "args": {"path": "a.txt"}},
+                    {"name": "read_file", "args": {"path": "b.txt"}},
+                    {"name": "read_file", "args": {"path": "c.txt"}},
+                ],
+            },
+            {"text": "Done.", "tool_calls": None},
+        ],
+        max_steps=2,
+    )
+    agent.ask("read all three")
+
+    events = []
+    for trace_file in (tmp_path / ".codingforme" / "runs").rglob("trace.jsonl"):
+        for line in trace_file.read_text(encoding="utf-8").splitlines():
+            events.append(json.loads(line))
+    executed = [e for e in events if e.get("event") == "tool_executed"]
+    skipped = [e for e in events if e.get("event") == "tool_skipped"]
+
+    assert len(executed) == 2
+    assert len(skipped) == 1
+    assert skipped[0]["reason"] == "step_budget_exhausted"
+    assert skipped[0]["call_index"] == 2
+    assert skipped[0]["call_count"] == 3
+
+
+def test_reissuing_a_skipped_call_is_not_blocked_as_a_repeat(tmp_path):
+    """被预算卡掉的调用，之后如实重发不能被判成「重复调用」。
+
+    重发只可能发生在**下一次** `ask()`：预算在批次中途耗尽时，这一次 `ask()`
+    的控制循环也随之结束，同一次请求里没有重发的机会。history 跨请求保留，
+    所以未执行的那条记录会一直躺在重复检测的观察窗口里。
+
+    构造成「同一批发了两个一模一样的调用」是为了让新旧实现真的分叉：
+    旧实现看最近两条工具记录（一条执行过、一条没执行）判定为重复并拦下，
+    模型于是永远拿不到我们刚刚请它重发的那个结果。
+    """
+    (tmp_path / "c.txt").write_text("CCC", encoding="utf-8")
+    agent = build_agent(
+        tmp_path,
+        [
+            # 第一次请求：一批两个相同调用，第一个执行、第二个被预算卡掉。
+            {
+                "text": "",
+                "tool_calls": [
+                    {"name": "read_file", "args": {"path": "c.txt"}},
+                    {"name": "read_file", "args": {"path": "c.txt"}},
+                ],
+            },
+            # 第二次请求：模型照提示重发那个没跑成的调用。
+            {"text": "", "tool_calls": [{"name": "read_file", "args": {"path": "c.txt"}}]},
+        ],
+        max_steps=1,
+    )
+    agent.ask("read it")
+    agent.ask("try that again")
+
+    tool_entries = [item for item in agent.session["history"] if item["role"] == "tool"]
+    assert [item.get("executed", True) for item in tool_entries] == [True, False, True]
+    assert "CCC" in tool_entries[2]["content"], (
+        f"重发应当真的读到内容，实际：{tool_entries[2]['content']!r}"
+    )
 
 
 def test_to_openai_function_specs_marks_required_vs_optional():
@@ -673,6 +1035,76 @@ def test_retry_notice_points_back_at_the_only_protocol():
     assert "function-calling interface" in notice
     assert "<tool>" not in notice
     assert "<final>" not in notice
+
+
+def _http_error(code, body):
+    return urllib.error.HTTPError(
+        "https://example.invalid/v1/chat/completions", code, "Bad Request", {}, io.BytesIO(body.encode("utf-8"))
+    )
+
+
+def test_a_4xx_that_is_really_an_upstream_connection_failure_gets_retried():
+    """网关把自己这侧的连接失败报成 400 时，必须当成可重试的抖动。
+
+    真实事故：一次 2.4 小时的 k=3 跑批在第三轮第 10 个任务上收到
+    `HTTP 400 ... finishConnect(..) failed: Connection refused: ...:80`，
+    那个地址是**服务端内网 IP**，与我们发出的请求无关。当时按状态码判成
+    客户端错误直接放弃，整轮跑批连同已完成的两轮聚合一起丢了。
+    """
+    body = (
+        '{"error":{"code":"400","message":"Request failed",'
+        '"param":"finishConnect(..) failed: Connection refused: host.internal/10.137.1.77:80","type":""}}'
+    )
+    calls = {"n": 0}
+
+    def fake_urlopen(request, timeout=None):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise _http_error(400, body)
+        return _FakeHTTPResponse('{"ok": true}')
+
+    with patch("codingforme.models.urllib.request.urlopen", fake_urlopen), \
+            patch("codingforme.models.time.sleep", lambda _seconds: None):
+        text, _content_type = _send_with_retry(object(), 30, "mimo-v2.5")
+
+    assert text == '{"ok": true}'
+    assert calls["n"] == 3, "应当重试到成功，而不是在第一个 400 上放弃"
+
+
+def test_a_genuine_4xx_is_not_retried():
+    """请求本身不合法时不能重试。
+
+    那是我们自己的 bug，重试三次只会白烧三个约 17 秒的往返，还把错误现场推迟。
+    这条测试锁住"放宽重试范围"没有被顺手放宽成"所有 400 都重试"。
+    """
+    calls = {"n": 0}
+
+    def fake_urlopen(request, timeout=None):
+        calls["n"] += 1
+        raise _http_error(400, '{"error":{"message":"unknown field: tolls"}}')
+
+    with patch("codingforme.models.urllib.request.urlopen", fake_urlopen), \
+            patch("codingforme.models.time.sleep", lambda _seconds: None):
+        with pytest.raises(RuntimeError, match="HTTP 400"):
+            _send_with_retry(object(), 30, "mimo-v2.5")
+
+    assert calls["n"] == 1, "格式错误的请求必须立刻报出来，不要重试"
+
+
+class _FakeHTTPResponse:
+    headers = {"Content-Type": "application/json"}
+
+    def __init__(self, body):
+        self._body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def read(self):
+        return self._body.encode("utf-8")
 
 
 def test_custom_backend_llm_retries_instead_of_crashing_on_reasoning_only_response():
@@ -822,7 +1254,7 @@ def test_scripted_outputs_use_the_same_shape_as_a_real_backend():
 
     call = tool_call("read_file", path="a.txt", start=1, end=2)
     assert call == {"text": "", "tool_calls": [{"name": "read_file", "args": {"path": "a.txt", "start": 1, "end": 2}}]}
-    assert CodingForMe.parse(call) == ("tool", {"name": "read_file", "args": {"path": "a.txt", "start": 1, "end": 2}})
+    assert CodingForMe.parse(call) == ("tool", [{"name": "read_file", "args": {"path": "a.txt", "start": 1, "end": 2}}])
 
     answer = final_answer("Done.")
     assert answer == {"text": "Done.", "tool_calls": None}
@@ -1890,14 +2322,19 @@ def test_recent_transcript_entries_stay_richer_than_older_ones(tmp_path):
     old_text = "OLD-" + ("A" * 320)
     recent_text = "RECENT-" + ("B" * 320)
 
+    # 2 条旧的 + 12 条新的。12 是最近窗口的条目上限（6 个工具轮 × 每轮最多
+    # 2 条记录：模型说明 + 工具结果），要让前两条落到「较早」那一段就得垫满。
     agent.record({"role": "user", "content": old_text, "created_at": "2026-04-07T09:00:00+00:00"})
     agent.record({"role": "assistant", "content": old_text, "created_at": "2026-04-07T09:01:00+00:00"})
-    agent.record({"role": "user", "content": recent_text, "created_at": "2026-04-07T09:02:00+00:00"})
-    agent.record({"role": "assistant", "content": recent_text, "created_at": "2026-04-07T09:03:00+00:00"})
-    agent.record({"role": "user", "content": recent_text, "created_at": "2026-04-07T09:04:00+00:00"})
-    agent.record({"role": "assistant", "content": recent_text, "created_at": "2026-04-07T09:05:00+00:00"})
-    agent.record({"role": "user", "content": recent_text, "created_at": "2026-04-07T09:06:00+00:00"})
-    agent.record({"role": "assistant", "content": recent_text, "created_at": "2026-04-07T09:07:00+00:00"})
+    for minute in range(2, 14):
+        role = "user" if minute % 2 == 0 else "assistant"
+        agent.record(
+            {
+                "role": role,
+                "content": recent_text,
+                "created_at": f"2026-04-07T09:{minute:02d}:00+00:00",
+            }
+        )
 
     assert agent.ask("Check the transcript") == "Done."
 
@@ -1949,3 +2386,473 @@ def test_module_execution_help_works():
 
     assert result.returncode == 0
     assert "usage:" in result.stdout.lower()
+
+
+# --- 缺口一：工具 schema 与错误信息 ------------------------------------------
+#
+# 这一组用例守的是「模型能从工具定义和报错里学到什么」。判据全部来自 k=3 真实
+# 跑批的被拒调用分布（342 次调用、50 次被拒）：路径写法 36%、patch 的 old_text
+# 没对上 14%、审批拒绝 10%、路径不存在 10%。每条断言都对应其中一类，不对应任何
+# 一类的（比如"多余参数"）没有用例，因为那一类的观测次数是 0。
+
+
+def test_every_path_argument_explains_the_reference_frame():
+    """凡是叫 path 的参数，都必须说清路径相对谁、什么写法会被拒。
+
+    实测占比最大的一类失败（36%）来自模型不知道该用相对还是绝对路径——而它唯一
+    见过的路径样本是 workspace 快照里那行绝对路径的 repo_root。工具定义不说，
+    模型照抄它是完全合理的推断。
+    """
+    tools = dict(toolkit.BASE_TOOL_SPECS)
+    tools["delegate"] = toolkit.DELEGATE_TOOL_SPEC
+    path_params = [
+        (name, spec["schema"]["path"])
+        for name, spec in tools.items()
+        if "path" in spec["schema"]
+    ]
+
+    assert path_params, "工具里应当有 path 参数，否则这条用例失去了对象"
+    for name, param in path_params:
+        description = param.get("description", "") if isinstance(param, dict) else ""
+        assert "relative to the repo root" in description, f"{name}.path 没说清参照系"
+        assert ".." in description, f"{name}.path 没说 '..' 会被拒"
+
+
+def test_function_specs_carry_descriptions_bounds_and_defaults():
+    """长写法的字段规格要完整翻译进标准 JSON Schema。
+
+    这些键是模型在**调用之前**唯一能看到的约束。丢掉任何一个，schema 就只剩
+    类型，等于把"什么是合法输入"重新推回给模型猜。
+    """
+    specs = {
+        spec["function"]["name"]: spec["function"]["parameters"]
+        for spec in toolkit.to_openai_function_specs(
+            {**toolkit.BASE_TOOL_SPECS, "delegate": toolkit.DELEGATE_TOOL_SPEC}
+        )
+    }
+
+    read_file = specs["read_file"]["properties"]
+    assert read_file["start"] == {
+        "type": "integer",
+        "description": "First line to read, counting from 1.",
+        "minimum": 1,
+        "default": 1,
+    }
+    assert specs["run_shell"]["properties"]["timeout"]["maximum"] == 120
+    assert specs["list_files"]["properties"]["path"]["default"] == "."
+    # 必填/选填的判定不受长写法影响：有默认值就是选填。
+    assert specs["read_file"]["required"] == ["path"]
+    assert specs["patch_file"]["required"] == ["path", "old_text", "new_text"]
+
+
+def test_function_specs_reject_unknown_arguments():
+    specs = toolkit.to_openai_function_specs(toolkit.BASE_TOOL_SPECS)
+
+    assert all(spec["function"]["parameters"]["additionalProperties"] is False for spec in specs)
+
+
+def test_short_form_schema_fields_still_work():
+    """裸字符串写法必须继续可用——测试里到处都是它，工具定义也允许混用。"""
+    specs = toolkit.to_openai_function_specs(
+        {"probe": {"schema": {"a": "str", "b": "int=7"}, "risky": False, "description": "d"}}
+    )
+    parameters = specs[0]["function"]["parameters"]
+
+    assert parameters["properties"] == {"a": {"type": "string"}, "b": {"type": "integer"}}
+    assert parameters["required"] == ["a"]
+
+
+def test_prefix_lists_tools_readably_and_shows_example_arguments(tmp_path):
+    """prefix 里的工具清单要是人/模型都读得懂的一行，并带上示例参数。
+
+    两件事：一是长写法的字段规格不能把 Python dict 字面量印进 prompt；二是示例
+    参数此前只在校验失败之后才回给模型，而 prefix 走前缀缓存（实测缓存占输入
+    token 的 75.4%），事前给几乎免费，事后给要烧掉一整个约 17 秒的往返。
+    """
+    agent = build_agent(tmp_path, [])
+
+    prefix = agent.build_prefix().text
+
+    assert "- read_file(path: str, start: int=1, end: int=200) [safe]" in prefix
+    assert 'example args: {"path": "README.md", "start": 1, "end": 80}' in prefix
+    assert "'description':" not in prefix, "长写法的字段规格被原样印进了 prompt"
+    # 路径参照系在 prompt 规则里也要说一次，不能只藏在工具参数说明里。
+    assert 'Every path argument is relative to the repo root' in prefix
+
+
+def test_path_escape_error_tells_the_model_the_correct_form(tmp_path):
+    agent = build_agent(tmp_path, [])
+
+    result = agent.run_tool("read_file", {"path": "../outside.txt"})
+
+    # 前缀不能动：run_tool 靠它把这次拒绝标成 path_escape 安全事件。
+    assert "path escapes workspace" in result
+    assert agent._last_tool_result_metadata["security_event_type"] == "path_escape"
+    # 后半句是新增的修复动作。
+    assert "relative to the repo root" in result
+
+
+def test_missing_path_error_points_at_a_next_step(tmp_path):
+    (tmp_path / "pkg").mkdir()
+    agent = build_agent(tmp_path, [])
+
+    missing = agent.run_tool("read_file", {"path": "pkg/nope.py"})
+    wrong_kind = agent.run_tool("read_file", {"path": "pkg"})
+
+    assert "no such file: pkg/nope.py" in missing
+    assert "list_files on 'pkg'" in missing, "报错要指出该去哪儿找，而不是让模型重试同一个路径"
+    assert "is a directory, not a file" in wrong_kind
+    assert "list_files" in wrong_kind
+
+
+def test_patch_miss_and_ambiguity_get_opposite_advice(tmp_path):
+    """命中 0 次和命中多次的修复方向相反，报错必须分开说。
+
+    0 次 → 把文本抄准（多半是缩进/空白没对上）；多次 → 把范围放大到唯一。
+    原来两种共用一句 "must occur exactly once, found N"，模型只能自己反推。
+    """
+    (tmp_path / "a.py").write_text("x = 1\ny = 2\nx = 1\n", encoding="utf-8")
+    agent = build_agent(tmp_path, [])
+
+    missed = agent.run_tool("patch_file", {"path": "a.py", "old_text": "z = 3", "new_text": "q"})
+    ambiguous = agent.run_tool("patch_file", {"path": "a.py", "old_text": "x = 1", "new_text": "q"})
+
+    assert "was not found" in missed
+    assert "byte for byte" in missed and "read_file" in missed
+    assert "occurs 2 times" in ambiguous
+    assert "more lines above and below" in ambiguous
+    # 两条建议不能互串：抄准和放大范围是相反的动作。
+    assert "byte for byte" not in ambiguous
+    assert "unique" not in missed
+
+
+def test_delegate_step_budget_is_bounded(tmp_path):
+    """schema 上写了 minimum/maximum，校验就必须真的执行它。
+
+    schema 声明了约束却不执行，比不声明更糟：模型据此以为 max_steps=999 合法。
+    """
+    agent = build_agent(tmp_path, [])
+
+    result = agent.run_tool("delegate", {"task": "look around", "max_steps": 999})
+
+    assert f"max_steps must be in [1, {toolkit.DELEGATE_MAX_STEPS_CEILING}]" in result
+
+
+# --- T1-6：参数归一 ---------------------------------------------------------
+
+
+def test_string_integers_are_normalised_before_the_gate(tmp_path):
+    """模型把整数写成字符串时，归一必须发生在闸口之前而不是 runner 内部。
+
+    这是实测出来的漏洞：`validate_tool()` 里散落着 `int(args.get(...))`，局部归一
+    让那一次执行成功，但 history / trace / 记忆 / 重复检测拿到的仍是原始值。
+    于是同一个动作换个写法就绕过了重复检测：
+
+        {"start": "1"} → 执行    {"start": "1"} → 执行    {"start": 1} → 又执行
+
+    重复调用是被拒调用里最大的一类（真实跑批占 37%），检测漏一档就没法区分
+    「模型少打转了」和「我们少查了几次」。
+    """
+    (tmp_path / "a.txt").write_text("A\nB\nC\n", encoding="utf-8")
+    agent = build_agent(
+        tmp_path,
+        [
+            tool_call("read_file", path="a.txt", start="1", end="3"),
+            tool_call("read_file", path="a.txt", start="1", end="3"),
+            tool_call("read_file", path="a.txt", start=1, end=3),
+            final_answer("done"),
+        ],
+        max_steps=6,
+    )
+
+    agent.ask("read it")
+
+    tool_items = [item for item in agent.session["history"] if item["role"] == "tool"]
+    assert [item["args"]["start"] for item in tool_items] == [1, 1, 1], "history 里记的应当是归一后的值"
+    assert "already called twice" in tool_items[2]["content"], (
+        f"换成 int 写法的同一调用应当被判重复，实际：{tool_items[2]['content']!r}"
+    )
+
+
+def test_coercion_leaves_unconvertible_values_for_validation_to_reject(tmp_path):
+    """归一不是校验：转不动就原样放行，让 validate_tool 报一个说得清的错。
+
+    在归一层抛异常会把「类型不对」变成一条来自归一层的、模型看不懂的报错。
+    """
+    (tmp_path / "a.txt").write_text("A\n", encoding="utf-8")
+    agent = build_agent(tmp_path, [])
+
+    result = agent.run_tool("read_file", {"path": "a.txt", "start": "not-a-number"})
+
+    assert result.startswith("error: invalid arguments for read_file")
+
+
+def test_coercion_never_rewrites_none_or_booleans():
+    """None 不能变成 "None"，bool 不能变成 0/1。
+
+    `str(None)` == "None" 会让 patch_file 拿着字面量 "None" 去文件里找；
+    Python 里 `bool` 是 `int` 的子类，静默转成 0/1 会掩盖模型发错类型这件事。
+    """
+    coerced = toolkit.coerce_tool_args(
+        "patch_file", {"path": "a.py", "old_text": None, "new_text": True}
+    )
+
+    assert coerced["old_text"] is None
+    assert coerced["new_text"] is True
+
+
+def test_coercion_keeps_unknown_arguments(tmp_path):
+    """未知参数原样保留，不静默丢弃。
+
+    丢掉会让模型以为它发的东西被接受了；留着则会走到 validate/runner 那里，
+    表现为一个它能看懂的错误或被忽略。
+    """
+    coerced = toolkit.coerce_tool_args("read_file", {"path": "a.txt", "bogus": "x"})
+
+    assert coerced["bogus"] == "x"
+
+
+def test_coercion_is_idempotent_and_ignores_unknown_tools():
+    once = toolkit.coerce_tool_args("run_shell", {"command": "ls", "timeout": "30"})
+    twice = toolkit.coerce_tool_args("run_shell", once)
+
+    assert once == {"command": "ls", "timeout": 30}
+    assert twice == once
+    # 未知工具没有 schema 可依，原样返回而不是抛异常。
+    assert toolkit.coerce_tool_args("no_such_tool", {"a": "1"}) == {"a": "1"}
+
+
+def _stale_checkpoint_session(agent, tmp_path):
+    """把 session 布置成「checkpoint 记的文件内容已经变了」。
+
+    与 `evaluator._apply_task_setup()` 的 `freshness_mismatch` 布景同构：
+    先给 runtime.py 存一份摘要并把它的 sha256 写进 checkpoint，再改文件，
+    于是下一次 `evaluate_resume_state()` 会判成 partial-stale。
+    """
+    agent.memory.set_file_summary("runtime.py", "runtime.py: alpha")
+    freshness = agent.memory.to_dict()["file_summaries"]["runtime.py"]["freshness"]
+    agent.session["checkpoints"] = {
+        "current_id": "ckpt_stale",
+        "items": {
+            "ckpt_stale": {
+                "checkpoint_id": "ckpt_stale",
+                "parent_checkpoint_id": "",
+                "schema_version": "phase1-v1",
+                "created_at": "2026-04-14T09:00:00+00:00",
+                "current_goal": "Fix stale summary handling",
+                "completed": [],
+                "excluded": [],
+                "current_blocker": "",
+                "next_step": "Re-read runtime.py",
+                "key_files": [{"path": "runtime.py", "freshness": freshness}],
+                "freshness": {"runtime.py": freshness},
+                "summary": "runtime.py is important",
+                "runtime_identity": {"workspace_fingerprint": agent.workspace.fingerprint()},
+            }
+        },
+    }
+    agent.session_store.save(agent.session)
+    (tmp_path / "runtime.py").write_text("beta\n", encoding="utf-8")
+
+
+def test_the_report_records_the_resume_state_the_run_started_from(tmp_path):
+    """report 里的 resume_status 说的是「这次运行从什么状态起步」，不随轮次漂。
+
+    踩过的坑：`report["prompt_metadata"]` 存的是**最后一轮**的元数据，而
+    `self.resume_state` 每次 refresh_prefix() 都重算——partial-stale 被重新
+    锚定之后就回到 full-valid 了。于是「这次运行是不是从一个过期 checkpoint
+    起步的」这个事实，只有恰好一轮就结束的运行才看得见；真实模型多走一步就
+    查不到，基准里两个 resume 任务因此 0/3 恒挂。
+    """
+    (tmp_path / "runtime.py").write_text("alpha\n", encoding="utf-8")
+    agent = build_agent(tmp_path, [final_answer("checkpoint ready.")])
+    _stale_checkpoint_session(agent, tmp_path)
+
+    resumed = CodingForMe.from_session(
+        model_client=FakeModelClient(
+            [tool_call("read_file", path="runtime.py"), final_answer("Resumed.")]
+        ),
+        workspace=build_workspace(tmp_path),
+        session_store=agent.session_store,
+        session_id=agent.session["id"],
+        approval_policy="auto",
+    )
+
+    assert resumed.ask("Continue the task") == "Resumed."
+    report = resumed.run_store.load_report(resumed.current_task_state.run_id)
+
+    # 顶层字段是运行级事实：起步时是过期的。
+    assert report["resume_status"] == "partial-stale"
+    # 逐轮字段仍然是逐轮的——重锚之后回到 full-valid 是对的，不要去"修"它。
+    assert report["prompt_metadata"]["resume_status"] == "full-valid"
+
+
+def test_the_run_start_resume_state_survives_a_setup_applied_after_construction(tmp_path):
+    """构造之后才布置的 stale 场景，也要能被顶层字段看见。
+
+    `BenchmarkEvaluator` 就是这个顺序：先建 agent，再 `_apply_task_setup()`
+    把 checkpoint 写脏，然后才 ask()。而 `self.resume_state` 是在 __init__ 里
+    算的——那时候还没脏。所以顶层字段不能直接抄构造期的值。
+    """
+    (tmp_path / "runtime.py").write_text("alpha\n", encoding="utf-8")
+    agent = build_agent(
+        tmp_path, [tool_call("read_file", path="runtime.py"), final_answer("Resumed.")]
+    )
+    assert agent.resume_state["status"] == "no-checkpoint"
+
+    _stale_checkpoint_session(agent, tmp_path)
+
+    assert agent.ask("Continue the task") == "Resumed."
+    report = agent.run_store.load_report(agent.current_task_state.run_id)
+    assert report["resume_status"] == "partial-stale"
+
+
+def test_tool_examples_ride_in_the_schema_the_backend_actually_parses():
+    """示例必须进 `parameters.examples`，不是 Anthropic 的 `input_examples`。
+
+    实测（16 次采样 × 3 组，工具参数格式只能从示例得知）：这个 OpenAI 兼容后端
+    把 JSON Schema 的标准关键字 `parameters.examples` 原样送到模型面前（16/16
+    吐出示例里那个无从推导的值），而 `function.input_examples` 被静默丢弃
+    （0/16）——不报错，只是没有效果。所以字段名不能换。
+    """
+    specs = to_openai_function_specs(toolkit.BASE_TOOL_SPECS)
+    by_name = {spec["function"]["name"]: spec["function"] for spec in specs}
+
+    for name, raw in toolkit.TOOL_EXAMPLES.items():
+        if name not in by_name:  # delegate 只在深度够时才注册
+            continue
+        assert by_name[name]["parameters"]["examples"] == [json.loads(raw)]
+        assert "input_examples" not in by_name[name]
+
+    # 示例本身必须是合法参数：教给模型一份过不了自己校验的调用毫无意义。
+    for name, raw in toolkit.TOOL_EXAMPLES.items():
+        json.loads(raw)
+
+
+def test_a_retry_records_why_the_turn_was_thrown_away(tmp_path):
+    """trace 上要分得出三类 retry，因为它们该改的东西完全相反。
+
+    空响应 / 推理阶段被 max_tokens 截断要调 `max_new_tokens`，形状不合法要改工具
+    schema 和示例。此前工件上三者都只是 `kind == "retry"`，分不出来就只能靠重跑
+    撞见。归因码见 runtime 的 `RETRY_REASON_*`。
+    """
+    (tmp_path / "hello.txt").write_text("alpha\n", encoding="utf-8")
+    agent = build_agent(
+        tmp_path,
+        [
+            # 后端返回了合法结构但内容为空：推理模型被 max_tokens 截断时的形状。
+            {"text": "", "tool_calls": None},
+            # 工具调用缺名字。
+            {"text": "", "tool_calls": [{"args": {}}]},
+            final_answer("Done."),
+        ],
+    )
+    assert agent.ask("Do the thing") == "Done."
+
+    run_dir = next(path for path in (tmp_path / ".codingforme" / "runs").iterdir() if path.is_dir())
+    events = [
+        json.loads(line)
+        for line in (run_dir / "trace.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    parsed = [event for event in events if event["event"] == "model_parsed"]
+    assert [event["kind"] for event in parsed] == ["retry", "retry", "final"]
+    assert [event["retry_reason"] for event in parsed] == [
+        "empty_response",
+        "missing_tool_name",
+        # 非 retry 的轮次恒为空串，别让读者以为漏记了。
+        "",
+    ]
+
+
+def test_retry_notices_never_teach_the_tag_syntax(tmp_path):
+    """retry notice 是第三条会泄漏协议写法的通道，和 prefix、报错信息同等约束。
+
+    曾经这里写着 "model returned an empty <final> answer"——模型出错的那一刻，
+    我们正好把它推向一套既没发 schema 也不打算支持的协议。
+    """
+    agent = build_agent(tmp_path, [])
+    for raw in (
+        {"text": "", "tool_calls": None},
+        {"text": "", "tool_calls": [{"args": {}}]},
+        {"text": "", "tool_calls": ["not-an-object"]},
+        {"text": "", "tool_calls": [{"name": "read_file", "args": "oops"}]},
+        "<tool>{not json",
+        "<final></final>",
+        "<tool name=>",
+    ):
+        kind, payload = agent.parse(raw)
+        assert kind == "retry", raw
+        assert "<tool" not in payload
+        assert "<final" not in payload
+        # 每一条都要带得出归因码，否则 trace 上又退回「只知道作废了」。
+        assert payload.reason
+
+
+def _cut_registry(agent, keep):
+    """把注册表裁到 keep，模拟 HarnessSpec 按白名单裁剪之后的 agent。"""
+    agent.tools = {name: spec for name, spec in agent.tools.items() if name in keep}
+    agent.refresh_prefix(force=True)
+    return agent
+
+
+def test_no_advice_ever_names_a_tool_the_registry_does_not_have(tmp_path):
+    """报错与 prompt 规则都不许把模型指向一个它调不到的工具。
+
+    背景：任务声明的 `allowed_tools` 接上之后（N-5），注册表会被裁到只剩两三个
+    工具，而当时有五处文案是硬写的——两条 prompt 规则、两句路径类报错、一句
+    patch 不匹配的报错。模型照着做只会拿回一句 `unknown tool`，白烧一个约 17 秒
+    的往返，而且多半会把同一个路径原样再试一次，正好撞上 `no_repeated_calls`。
+    """
+    (tmp_path / "a.txt").write_text("alpha\n", encoding="utf-8")
+    (tmp_path / "sub").mkdir()
+    agent = _cut_registry(build_agent(tmp_path, []), {"read_file", "patch_file"})
+    absent = {"list_files", "search", "write_file", "run_shell", "delegate"}
+
+    # 按词边界匹配：patch_file 的示例参数里有个 `binary_search.py`，
+    # 裸子串会把它误判成在推荐 search 工具。
+    def names_in(text):
+        return {name for name in absent if re.search(rf"{name}", text)}
+
+    # 通道一：prompt（规则段 + 工具清单，都进 system 消息）。
+    assert names_in(agent.prefix) == set(), "prefix 仍然提到了不可用的工具"
+
+    # 通道二：参数校验失败后回给模型的报错。
+    advice = [
+        agent.run_tool("read_file", {"path": "sub"}),          # 是目录不是文件
+        agent.run_tool("read_file", {"path": "nope.txt"}),     # 路径不存在
+        agent.run_tool("patch_file", {"path": "a.txt", "old_text": "zzz", "new_text": "q"}),
+    ]
+    for message in advice:
+        assert message.startswith("error:"), message
+        assert names_in(message) == set(), f"报错建议里出现了不可用的工具：{message}"
+
+    # 通道三：调到被裁掉的工具时，报错要把「那我能调什么」一并给出。
+    unknown = agent.run_tool("list_files", {"path": "."})
+    assert unknown == "error: unknown tool 'list_files'. Available tools: patch_file, read_file"
+
+
+def test_advice_still_names_the_tools_that_are_available(tmp_path):
+    """反向证据：注册表齐全时那几句建议必须照旧出现。
+
+    没有这条，上一条测试用「把所有建议都删掉」也能通过。
+    """
+    (tmp_path / "a.txt").write_text("alpha\n", encoding="utf-8")
+    (tmp_path / "sub").mkdir()
+    agent = build_agent(tmp_path, [])
+
+    assert "use write_file or patch_file instead of repeatedly listing files" in agent.prefix
+    assert "Use list_files to see what is inside it." in agent.run_tool("read_file", {"path": "sub"})
+    assert "Use list_files on '.' or search to find the right path" in agent.run_tool(
+        "read_file", {"path": "nope.txt"}
+    )
+    assert "Read the file with read_file" in agent.run_tool(
+        "patch_file", {"path": "a.txt", "old_text": "zzz", "new_text": "q"}
+    )
+
+
+def test_a_registry_with_no_write_tools_drops_the_rule_instead_of_emptying_it(tmp_path):
+    """一条工具都不剩时整句删掉，而不是留一句指向空集的规则。"""
+    agent = _cut_registry(build_agent(tmp_path, []), {"read_file"})
+    assert "instead of repeatedly listing files" not in agent.prefix
+    assert "Do not call read_file with args={}." in agent.prefix
+    assert "__WRITE_RULE__" not in agent.prefix and "__REQUIRED_ARGS_RULE__" not in agent.prefix

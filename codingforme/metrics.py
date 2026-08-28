@@ -4,12 +4,13 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-from .config import load_project_env, provider_env
-from .evaluator import run_fixed_benchmark
+from .config import load_project_env, project_root, provider_env
+from .evaluator import DEFAULT_MAX_NEW_TOKENS, run_fixed_benchmark
 from .models import (
     FakeModelClient,
     OpenAICompatibleModelClient,
     final_answer,
+    flatten_messages,
     force_tool_choice,
     tool_call,
 )
@@ -182,7 +183,7 @@ def measure_feature_ablation_metrics(agent, user_message):
     results = {}
     for name, updates in variants.items():
         with _temporary_feature_flags(agent, updates):
-            prompt, metadata = agent._build_prompt_and_metadata(user_message)
+            _, prompt, metadata = agent._build_context(user_message)
         results[name] = {
             "prompt_chars": int(metadata.get("prompt_chars", 0)),
             "memory_chars": int(metadata.get("sections", {}).get("memory", {}).get("rendered_chars", 0)),
@@ -230,8 +231,11 @@ class _MemoryExperimentModelClient(FakeModelClient):
         self.phase = "bootstrap_tool"
         self.followup_reads = 0
 
-    def complete(self, prompt, max_new_tokens, **kwargs):
+    def complete(self, messages, max_new_tokens, **kwargs):
         del max_new_tokens, kwargs
+        # 这个脚本化 client 靠"上下文里有没有某段文字"来决定下一步，所以先把
+        # messages 压平成文本视图再判断。
+        prompt = flatten_messages(messages)
         self.prompts.append(prompt)
         self.last_completion_metadata = {}
         if self.phase == "bootstrap_tool":
@@ -684,7 +688,7 @@ def _provider_summary_from_artifact(payload):
 
 
 def _provider_profile(provider):
-    load_project_env(Path.cwd())
+    load_project_env(project_root())
     api_key = provider_env("CODINGFORME_OPENAI_API_KEY", ("OPENAI_API_KEY",))
     if not api_key:
         return {"provider": provider, "status": "blocked", "reason": "CODINGFORME_OPENAI_API_KEY or OPENAI_API_KEY missing"}
@@ -717,7 +721,9 @@ def _normalize_text(value):
     return text
 
 
-def run_provider_experiments(benchmark_path, workspace_root, artifact_root, max_new_tokens=64):
+def run_provider_experiments(
+    benchmark_path, workspace_root, artifact_root, max_new_tokens=DEFAULT_MAX_NEW_TOKENS
+):
     benchmark_path = Path(benchmark_path)
     workspace_root = Path(workspace_root)
     artifact_root = Path(artifact_root)
@@ -1416,8 +1422,9 @@ class _RecoveryScenarioModelClient(FakeModelClient):
         self.required_fragments = [str(fragment).lower() for fragment in required_fragments]
         self.success_answer = str(success_answer)
 
-    def complete(self, prompt, max_new_tokens, **kwargs):
+    def complete(self, messages, max_new_tokens, **kwargs):
         del max_new_tokens, kwargs
+        prompt = flatten_messages(messages)
         self.prompts.append(prompt)
         self.last_completion_metadata = {}
         prompt_lower = str(prompt).lower()
@@ -1670,7 +1677,12 @@ def _run_recovery_task_variant(task, variant):
             json.loads(line)
             for line in agent.run_store.trace_path(agent.current_task_state).read_text(encoding="utf-8").splitlines()
         ]
-        resume_status = str(report.get("prompt_metadata", {}).get("resume_status", ""))
+        # 顶层字段是**运行级**取值（首轮钉死，不随重锚漂），才是这里要的；
+        # prompt_metadata 里那个是最后一轮的逐轮取值，只对老工件回落使用。
+        resume_status = str(
+            report.get("resume_status")
+            or report.get("prompt_metadata", {}).get("resume_status", "")
+        )
         stale_reanchored = any(
             event.get("event") == "checkpoint_created" and event.get("trigger") == "freshness_mismatch"
             for event in trace

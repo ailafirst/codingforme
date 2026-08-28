@@ -12,7 +12,7 @@ import sys
 import textwrap
 import unicodedata
 
-from .config import load_project_env, provider_env
+from .config import load_project_env, project_root, provider_env
 from .models import OpenAICompatibleModelClient
 from .runtime import CodingForMe, SessionStore
 from .workspace import WorkspaceContext, middle
@@ -123,6 +123,56 @@ def _build_model_client(args):
         timeout=getattr(args, "openai_timeout", 300),
         capabilities=_configured_capabilities(),
     )
+
+
+def _make_output_resilient():
+    """让 stdout/stderr 遇到宿主编码表达不了的字符时降级，而不是崩掉整个进程。
+
+    踩过的坑：Windows 默认控制台是 GBK，横幅里的 `✦`(U+2726) 编不出来，于是
+    `python -m codingforme` 在打招呼那一行就抛 UnicodeEncodeError，agent 根本起不来。
+    横幅只是最先撞上的那个——模型答案里出现 emoji、工具回显里带上非 GBK 字符，
+    一样会把整个 REPL 打断。
+
+    只改 `errors` 不改 `encoding` 是刻意的：强行改成 utf-8 会让 GBK 终端把**所有**
+    中文渲染成乱码，而本项目的输出大量是中文。保持宿主编码 + `replace`，
+    代价只是少数装饰字符显示成 `?`，中文和框线（GBK 都能编）完全不受影响。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            # 被重定向成不支持 reconfigure 的对象（测试里的 StringIO 等）就跳过。
+            pass
+
+
+# UI 里用到的、GBK 编不出来的全部 4 个装饰字符及其 ASCII 近似物。
+# （框线那 25 个 unicode 字符 GBK 都能编，不需要降级。）
+_GLYPH_FALLBACKS = {
+    "✦": "*",   # 吉祥物头顶的火花
+    "✻": "*",   # 标题火花
+    "❯": ">",   # 输入提示符
+    "‿": "_",   # 吉祥物的嘴
+}
+
+
+def _terminal_safe(text):
+    """把当前终端编码写不出的装饰字符换成 ASCII 近似物。
+
+    只作用于我们自己的 UI chrome（横幅、提示符、回答框标题）。光靠
+    `_make_output_resilient()` 的 `errors="replace"` 不会崩，但会印出一串 `?`；
+    这里给出的是有意设计的降级形态，而不是"坏掉的样子"。
+
+    模型输出不走这里——那部分内容无法预先枚举，交给 `errors="replace"` 兜底。
+    """
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        text.encode(encoding)
+        return text
+    except (UnicodeEncodeError, LookupError):
+        pass
+    for fancy, plain in _GLYPH_FALLBACKS.items():
+        text = text.replace(fancy, plain)
+    return text
 
 
 def _display_width(text):
@@ -320,7 +370,6 @@ def build_agent(args, on_token=None):
     # 这里是 CLI 到 runtime 的装配点：
     # 先采集工作区快照和加载项目级环境，再整理 secret 名单、模型后端和 session。
     workspace = WorkspaceContext.build(args.cwd)
-    load_project_env(workspace.repo_root)
     configured_secret_names = _configured_secret_names(args)
     store = SessionStore(workspace.repo_root + "/.codingforme/sessions")
     model = _build_model_client(args)
@@ -374,14 +423,23 @@ def build_arg_parser():
         default=[],
         help="Extra environment variable names to treat as secrets for trace/report redaction.",
     )
-    parser.add_argument("--max-steps", type=int, default=6, help="Maximum tool/model iterations per request.")
-    parser.add_argument("--max-new-tokens", type=int, default=512, help="Maximum model output tokens per step.")
+    parser.add_argument("--max-steps", type=int, default=20, help="Maximum tool/model iterations per request.")
+    parser.add_argument("--max-new-tokens", type=int, default=1024, help="Maximum model output tokens per step.")
     parser.add_argument("--temperature", type=float, default=0.2, help="Sampling temperature.")
     return parser
 
 
 def main(argv=None):
     args = build_arg_parser().parse_args(argv)
+    # 必须在任何 print 之前：横幅是第一处输出，也是第一处会因编码崩掉的地方。
+    _make_output_resilient()
+    # `.env` 只从本仓库读，与 --cwd 指向哪里无关（见 config.project_root 的说明）。
+    #
+    # 放在 main() 而不是 build_agent() 里：往 os.environ 里灌东西是**进程级副作用**，
+    # 只该由 CLI 启动这一处做。放进 build_agent 会让直接调它的测试读到开发机上真实的
+    # `.env`，于是"默认模型是什么"这类断言变成随开发机配置而定——实测正是这样挂掉了
+    # 4 条用例。必须排在 build_agent 之前，模型/密钥的解析都依赖它。
+    load_project_env(project_root())
     use_color = _supports_color()
     pal = _welcome_palette(use_color)
 
@@ -393,14 +451,15 @@ def main(argv=None):
     agent = build_agent(args, on_token=on_token)
 
     model = getattr(agent.model_client, "model", DEFAULT_OPENAI_MODEL)
-    print(build_welcome(agent, model=model, color=use_color))
+    print(_terminal_safe(build_welcome(agent, model=model, color=use_color)))
     # 输入提示符：始终在屏幕上的一段 UI chrome，配合每轮回答的框，
     # 让对话过程中圆角框风格不会“滚一会儿就消失”。
-    prompt_str = f"\n{pal['accent']}❯{pal['reset']} "
+    prompt_str = f"\n{pal['accent']}{_terminal_safe('❯')}{pal['reset']} "
+    answer_title = _terminal_safe(f"{WELCOME_SPARK} coding-for-me")
 
-    def show(text, *, title="✻ coding-for-me"):
+    def show(text, *, title=None):
         print()
-        print(_render_box(text, title=title, color=use_color))
+        print(_render_box(text, title=title or answer_title, color=use_color))
 
     if args.prompt:
         # one-shot 模式：只跑一次 ask，不进入 REPL 循环。

@@ -37,12 +37,23 @@ class TaskState:
     final_answer: str = ""
     checkpoint_id: str = ""
     resume_status: str = ""
+    # 这次运行属于哪个会话、是该会话里的第几次 ask()。
+    # run 工件此前只有 run_id，落盘后无法回连到 session，跨 session 的评测
+    # 在数据层就做不了；这两个字段就是那条 join 键。
+    session_id: str = ""
+    run_seq: int = 0
 
     @classmethod
-    def create(cls, task_id, user_request, run_id=""):
+    def create(cls, task_id, user_request, run_id="", session_id="", run_seq=0):
         if not run_id:
             run_id = "run_" + datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid4().hex[:6]
-        return cls(run_id=run_id, task_id=task_id, user_request=user_request)
+        return cls(
+            run_id=run_id,
+            task_id=task_id,
+            user_request=user_request,
+            session_id=str(session_id or ""),
+            run_seq=int(run_seq or 0),
+        )
 
     @classmethod
     def from_dict(cls, data):
@@ -58,6 +69,8 @@ class TaskState:
             final_answer=str(data.get("final_answer", "")),
             checkpoint_id=str(data.get("checkpoint_id", "")),
             resume_status=str(data.get("resume_status", "")),
+            session_id=str(data.get("session_id", "")),
+            run_seq=int(data.get("run_seq", 0) or 0),
         )
 
     def record_attempt(self):
@@ -107,4 +120,6 @@ class TaskState:
             "final_answer": self.final_answer,
             "checkpoint_id": self.checkpoint_id,
             "resume_status": self.resume_status,
+            "session_id": self.session_id,
+            "run_seq": self.run_seq,
         }

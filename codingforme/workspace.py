@@ -79,6 +79,25 @@ def render_file_tree(file_tree):
     return "\n".join(lines) or "- (empty)"
 
 
+def _walk_relative_paths(root, limit=400):
+    """把工作区里的文件列出来，跳过 `IGNORED_PATH_NAMES` 里那些噪声目录。
+
+    只在「这个工作区不是它所在 git 仓库的顶层」时才用得上——那时 git 索引讲的是
+    别人的事。限制条数是为了别让一个大目录把 prefix 撑爆。
+    """
+    root = Path(root)
+    found = []
+    for path in sorted(root.rglob("*")):
+        if len(found) >= limit:
+            break
+        if not path.is_file():
+            continue
+        if any(part in IGNORED_PATH_NAMES for part in path.relative_to(root).parts):
+            continue
+        found.append(str(path.relative_to(root)).replace("\\", "/"))
+    return found
+
+
 class WorkspaceContext:
     def __init__(self, cwd, repo_root, branch, default_branch, status, recent_commits, project_docs, file_tree):
         self.cwd = cwd
@@ -101,6 +120,10 @@ class WorkspaceContext:
                     cwd=cwd,
                     capture_output=True,
                     text=True,
+                    # 显式指定编码：不指定时按宿主 ANSI 代码页解码 git 输出，
+                    # 中文 Windows 上遇到非 ASCII 的提交信息会抛 UnicodeDecodeError。
+                    encoding="utf-8",
+                    errors="replace",
                     check=True,
                     timeout=5,
                 )
@@ -108,11 +131,15 @@ class WorkspaceContext:
             except Exception:
                 return fallback
 
-        repo_root = (
-            Path(repo_root_override).resolve()
-            if repo_root_override is not None
-            else Path(git(["rev-parse", "--show-toplevel"], str(cwd))).resolve()
-        )
+        git_toplevel = Path(git(["rev-parse", "--show-toplevel"], str(cwd))).resolve()
+        repo_root = Path(repo_root_override).resolve() if repo_root_override is not None else git_toplevel
+        # 调用方显式指定了根、而这个根又不是 git 顶层时（评测把每个任务的样板仓库
+        # 复制到某处、再限定在那份拷贝上，而那个位置恰好落在某个 git 仓库里面），
+        # git 报出来的分支、状态、提交记录讲的是**外层仓库**的事，不是这个工作区的。
+        # 原样塞进快照有两个害处：一是给模型一堆与任务无关的文件名（实测把 prefix
+        # 从约 3400 撑到约 7400 字符，超过段预算后样板仓库自己的快照反而被截掉），
+        # 二是把外层仓库的文件名泄露给一个本不该看到它们的 agent。
+        foreign_git = repo_root != git_toplevel
         docs = {}
         # 同时扫描 repo_root 和 cwd，这样在子目录启动时也能看到本地文档；
         # 但用相对路径做 key，避免同一份文档被重复收集。
@@ -128,18 +155,24 @@ class WorkspaceContext:
 
         # tracked + 未被 .gitignore 忽略的 untracked 文件；不走文件系统 rglob，
         # 直接吃 git 索引，天然遵守 .gitignore。
-        tracked_output = git(["ls-files", "--cached", "--others", "--exclude-standard"], "")
-        file_tree = build_file_tree(line for line in tracked_output.splitlines() if line.strip())
+        # 同理：外层仓库的 git 索引列的是外层的文件，而且这份拷贝多半整个被
+        # .gitignore 掉了（于是列出来是空的）。这种情况下退回文件系统遍历，
+        # 至少让模型看得见自己工作区里真实有哪些文件。
+        if foreign_git:
+            file_tree = build_file_tree(_walk_relative_paths(repo_root))
+        else:
+            tracked_output = git(["ls-files", "--cached", "--others", "--exclude-standard"], "")
+            file_tree = build_file_tree(line for line in tracked_output.splitlines() if line.strip())
 
         return cls(
             cwd=str(cwd),
             repo_root=str(repo_root),
-            branch=git(["branch", "--show-current"], "-") or "-",
-            default_branch=(
+            branch="-" if foreign_git else (git(["branch", "--show-current"], "-") or "-"),
+            default_branch="-" if foreign_git else (
                 lambda branch: branch[len("origin/") :] if branch.startswith("origin/") else branch
             )(git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], "origin/main") or "origin/main"),
-            status=clip(git(["status", "--short"], "clean") or "clean", 1500),
-            recent_commits=[line for line in git(["log", "--oneline", "-5"]).splitlines() if line],
+            status="clean" if foreign_git else clip(git(["status", "--short"], "clean") or "clean", 1500),
+            recent_commits=[] if foreign_git else [line for line in git(["log", "--oneline", "-5"]).splitlines() if line],
             project_docs=docs,
             file_tree=file_tree,
         )
@@ -149,23 +182,41 @@ class WorkspaceContext:
         commits = "\n".join(f"- {line}" for line in self.recent_commits) or "- none"
         docs = "\n".join(f"- {path}\n{snippet}" for path, snippet in self.project_docs.items()) or "- none"
         tree = render_file_tree(self.file_tree)
-        return textwrap.dedent(
-            f"""\
+        # 多行插值一律走占位符，替换放在 dedent **之后**。
+        # 直接写 {self.status} / {commits} / {docs} / {tree} 会让 dedent 失效：
+        # f-string 是先插值再 dedent 的，而这几个值都是多行且行首无空格，一展开
+        # 所有行的公共缩进就变成 0，dedent 于是什么都不做——整段 Workspace 带着
+        # 12 个空格的缩进发给模型（实测 15 行里有 14 行中招）。这和 runtime.py
+        # 的 build_prefix() 是同一个坑，两处修法保持一致。
+        template = textwrap.dedent(
+            """\
             Workspace:
-            - cwd: {self.cwd}
-            - repo_root: {self.repo_root}
-            - branch: {self.branch}
-            - default_branch: {self.default_branch}
+            - cwd: __CWD__
+            - repo_root: __REPO_ROOT__
+            - branch: __BRANCH__
+            - default_branch: __DEFAULT_BRANCH__
             - status:
-            {self.status}
+            __STATUS__
             - recent_commits:
-            {commits}
+            __COMMITS__
             - project_docs:
-            {docs}
+            __DOCS__
             - project_tree:
-            {tree}
+            __TREE__
             """
-        ).strip()
+        )
+        for placeholder, value in (
+            ("__CWD__", self.cwd),
+            ("__REPO_ROOT__", self.repo_root),
+            ("__BRANCH__", self.branch),
+            ("__DEFAULT_BRANCH__", self.default_branch),
+            ("__STATUS__", self.status),
+            ("__COMMITS__", commits),
+            ("__DOCS__", docs),
+            ("__TREE__", tree),
+        ):
+            template = template.replace(placeholder, str(value))
+        return template.strip()
 
     def fingerprint(self):
         # 这个指纹用来判断仓库状态是否发生了足够大的变化，
