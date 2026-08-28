@@ -5,6 +5,7 @@ from collections import Counter
 import pytest
 
 from codingforme.eval.scorers import ASSERTION_SUBJECTS
+from codingforme.models import FakeModelClient, final_answer
 from codingforme.evaluator import (
     BenchmarkEvaluator,
     load_benchmark,
@@ -398,3 +399,52 @@ def test_the_trace_records_both_the_declared_allowlist_and_the_actual_registry(t
     metadata = built[0]["prompt_metadata"]
     assert metadata["tools_allowlist"] == ["read_file"]
     assert metadata["tool_names"] == ["read_file"]
+
+
+def test_a_fixture_never_carries_a_previous_runs_session_into_the_workspace(tmp_path):
+    """样板仓库里残留的 `.codingforme/` 不能被复制进任务工作区。
+
+    live 跑批会在样板仓库里写下 session 与 run 工件（它们本来就该落在工作区里，
+    而 live 跑批的工作区一度就是样板仓库本身）。判分不受影响——工作区快照和
+    P2P 的回归快照都各自排除了这个目录——但复制过去会让每个任务凭空多出一份
+    别的运行留下的 session，resume 那几个任务尤其容易被误读成「恢复成功了」。
+    """
+    fixture = tmp_path / "tests" / "fixtures" / "bench_repo_readme"
+    (fixture / ".codingforme" / "sessions").mkdir(parents=True)
+    (fixture / ".codingforme" / "sessions" / "stray.json").write_text("{}", encoding="utf-8")
+    (fixture / "__pycache__").mkdir()
+    (fixture / "__pycache__" / "stale.pyc").write_bytes(b"\x00")
+    (fixture / "README.md").write_text("hello\n", encoding="utf-8")
+
+    benchmark_path = tmp_path / "benchmarks" / "mini.json"
+    benchmark_path.parent.mkdir(parents=True)
+    benchmark_path.write_text("{}", encoding="utf-8")
+
+    evaluator = BenchmarkEvaluator(
+        benchmark_path=benchmark_path,
+        artifact_path=tmp_path / "artifact.json",
+        workspace_root=tmp_path / "workspaces",
+        model_client_factory=lambda task, workspace: FakeModelClient([final_answer("Done.")]),
+    )
+    row = evaluator.run_task(
+        {
+            "id": "mini_task",
+            "prompt": "Do nothing.",
+            "fixture_repo": "tests/fixtures/bench_repo_readme",
+            "allowed_tools": ["read_file"],
+            "step_budget": 2,
+            "expected_artifact": "README.md",
+            "checks": {
+                "fail_to_pass": [{"kind": "file_contains", "path": "README.md", "text": "hello"}],
+                "pass_to_pass": [{"kind": "file_exists", "path": "README.md"}],
+            },
+            "mutable_paths": ["README.md"],
+            "category": "documentation",
+        }
+    )
+
+    copied = (tmp_path / "workspaces" / row["fixture_copy_relpath"]).resolve()
+    assert (copied / "README.md").exists()
+    # 这次运行自己写下的 session 会在这里，所以断言的是「那个残留的文件」不在。
+    assert not (copied / ".codingforme" / "sessions" / "stray.json").exists()
+    assert not (copied / "__pycache__").exists()

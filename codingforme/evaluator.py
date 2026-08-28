@@ -25,7 +25,7 @@ from .models import FakeModelClient, final_answer, tool_call
 from .runtime import SessionStore
 from .run_store import RunStore
 from .task_state import STOP_REASON_FINAL_ANSWER_RETURNED
-from .workspace import WorkspaceContext
+from .workspace import IGNORED_PATH_NAMES, WorkspaceContext
 
 # v2 相对 v1 的两处不兼容改动（见 eval/checks.py 的模块说明）：
 #   - `verifier`（一条 shell 命令）→ `checks`（声明式的 F2P / P2P 两组断言）
@@ -650,7 +650,15 @@ class BenchmarkEvaluator:
         if fixture_copy_root.exists():
             shutil.rmtree(fixture_copy_root)
         fixture_copy_root.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(fixture_source, fixture_copy_root)
+        # 样板仓库里可能残留上一次 live 跑批写下的 `.codingforme/`（session、run 工件）。
+        # 复制过去不会影响判分——工作区快照和 P2P 的回归快照都各自排除了这个目录——但会让
+        # 每个任务的工作区里凭空多出一份别的运行的 session，resume 相关任务尤其容易被误读。
+        # 名单直接取自 workspace 的那份，避免两处各写一份、慢慢漂开。
+        shutil.copytree(
+            fixture_source,
+            fixture_copy_root,
+            ignore=shutil.ignore_patterns(*IGNORED_PATH_NAMES),
+        )
 
         workspace = WorkspaceContext.build(
             fixture_copy_root,
