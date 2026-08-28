@@ -1,0 +1,3456 @@
+{
+  "benchmark": {
+    "source": "benchmarks\\coding_tasks.json",
+    "task_count": 12
+  },
+  "captured_at": "2026-08-19T14:27:09+0800",
+  "execution_mode": "oracle-replay",
+  "failure_category_counts": {},
+  "harness": {
+    "approval_policy": "auto",
+    "description": "\u5168\u90e8\u673a\u5236\u5f00\u542f\u7684\u57fa\u7ebf\u914d\u7f6e",
+    "feature_flags": {
+      "context_reduction": true,
+      "memory": true,
+      "prompt_cache": true,
+      "relevant_memory": true
+    },
+    "fingerprint": "sha256:051b4208d27378a2d3095aa3bfaa48b9d4535a859aea4b9595854ddfd19e2028",
+    "max_depth": 1,
+    "max_new_tokens": 1024,
+    "max_steps": 6,
+    "name": "full",
+    "read_only": false,
+    "schema_version": 1,
+    "section_budgets": null,
+    "tools_allowlist": null,
+    "total_budget": null
+  },
+  "reproducibility": {
+    "decoding": {
+      "max_new_tokens": 1024,
+      "temperature": 0.0,
+      "top_p": 1.0
+    },
+    "execution_mode": "oracle-replay",
+    "fixture_snapshot_id": "sha256:1bac1437e9e4a567cf2314c418bebd163324f4dc3006b528eb28eeb2a281218e",
+    "locale": "Chinese (Simplified)_China.936",
+    "model_name": "FakeModelClient",
+    "model_version": "scripted-deterministic",
+    "timezone": "Asia/Shanghai"
+  },
+  "rows": [
+    {
+      "allowed_tools": [
+        "read_file",
+        "patch_file"
+      ],
+      "artifact_digest": "sha256:63196856afcd459cad75f233faca8bc2d9c0db0e31281afd7e100ccb852118e4",
+      "artifact_exists": true,
+      "artifact_path": "README.md",
+      "attempts": 2,
+      "budget_enforced": true,
+      "category": "documentation",
+      "check_results": {
+        "fail_to_pass": [
+          {
+            "detail": "",
+            "kind": "file_contains",
+            "passed": true,
+            "target": "README.md"
+          },
+          {
+            "detail": "",
+            "kind": "file_not_contains",
+            "passed": true,
+            "target": "README.md"
+          }
+        ],
+        "pass_to_pass": [
+          {
+            "detail": "",
+            "kind": "file_contains",
+            "passed": true,
+            "target": "README.md"
+          },
+          {
+            "detail": "",
+            "kind": "file_contains",
+            "passed": true,
+            "target": "README.md"
+          },
+          {
+            "detail": "",
+            "kind": "file_contains",
+            "passed": true,
+            "target": "README.md"
+          },
+          {
+            "detail": "",
+            "kind": "file_contains",
+            "passed": true,
+            "target": "README.md"
+          }
+        ]
+      },
+      "checks": {
+        "fail_to_pass": [
+          {
+            "kind": "file_contains",
+            "path": "README.md",
+            "text": "This fixture is a locked benchmark workspace."
+          },
+          {
+            "kind": "file_not_contains",
+            "path": "README.md",
+            "text": "This is a placeholder benchmark fixture."
+          }
+        ],
+        "pass_to_pass": [
+          {
+            "kind": "file_contains",
+            "path": "README.md",
+            "text": "# Bench Repo README"
+          },
+          {
+            "kind": "file_contains",
+            "path": "README.md",
+            "text": "## Notes"
+          },
+          {
+            "kind": "file_contains",
+            "path": "README.md",
+            "text": "- Placeholder note about the repo."
+          },
+          {
+            "kind": "file_contains",
+            "path": "README.md",
+            "text": "- Placeholder note about the file layout."
+          }
+        ]
+      },
+      "effective_max_steps": 16,
+      "expected_artifact": "README.md opening sentence is locked benchmark workspace text",
+      "expected_artifact_exists": true,
+      "fail_to_pass_passed": true,
+      "failure_category": null,
+      "final_answer": "Done.",
+      "fixture_copy_relpath": "readme_intro_locked\\bench_repo_readme",
+      "fixture_repo": "tests/fixtures/bench_repo_readme",
+      "id": "readme_intro_locked",
+      "initial_episodic_notes_empty": true,
+      "initial_history_empty": true,
+      "initial_memory_empty": true,
+      "initial_task_summary_empty": true,
+      "mutable_paths": [
+        "README.md"
+      ],
+      "non_failure_stop_reason": true,
+      "pass_to_pass_passed": true,
+      "passed": true,
+      "prompt": "In the README fixture, replace the placeholder opening sentence with 'This fixture is a locked benchmark workspace.'",
+      "regressions": [],
+      "report": {
+        "attempts": 2,
+        "checkpoint_id": "ckpt_9c006b45",
+        "durable_promotions": [],
+        "durable_rejections": [],
+        "durable_superseded": [],
+        "final_answer": "Done.",
+        "max_steps": 16,
+        "prompt_metadata": {
+          "budget_reductions": [],
+          "current_request": {
+            "dropped_chars": 0,
+            "raw_chars": 116,
+            "rendered_chars": 116,
+            "section_chars": 138,
+            "text": "In the README fixture, replace the placeholder opening sentence with 'This fixture is a locked benchmark workspace.'",
+            "truncated": false
+          },
+          "history": {
+            "collapsed_duplicate_reads": 0,
+            "older_entries_count": 0,
+            "raw_chars": 417,
+            "rendered_chars": 417,
+            "reused_file_summary_count": 0,
+            "summarized_tool_count": 0
+          },
+          "history_batched_turns": 0,
+          "history_chars": 405,
+          "history_tool_calls_replayed": 1,
+          "memory_chars": 218,
+          "message_count": 7,
+          "message_layout": {
+            "checkpoint_split_out": false,
+            "memory_own_message": true,
+            "name": "stable-system-v3",
+            "workspace_split_out": true
+          },
+          "message_roles": {
+            "assistant": 1,
+            "system": 1,
+            "tool": 1,
+            "user": 4
+          },
+          "messages_chars": 4197,
+          "native_tool_calls": true,
+          "prefix_changed": true,
+          "prefix_chars": 4430,
+          "prefix_hash": "70ed541f330703b38653e7d324e16000bf72b7f37564ffec0ba8a4cc015b7bad",
+          "prompt_budget_chars": 12000,
+          "prompt_cache_key": "70ed541f330703b38653e7d324e16000bf72b7f37564ffec0ba8a4cc015b7bad",
+          "prompt_cache_supported": false,
+          "prompt_chars": 4404,
+          "prompt_over_budget": false,
+          "recent_commits": 4,
+          "reduction_order": [
+            "relevant_memory",
+            "history",
+            "memory",
+            "prefix"
+          ],
+          "relevant_memory": {
+            "limit": 3,
+            "raw_chars": 23,
+            "rendered_chars": 23,
+            "rendered_count": 0,
+            "rendered_notes": [],
+            "selected_count": 0,
+            "selected_durable_count": 0,
+            "selected_kinds": [],
+            "selected_notes": [],
+            "selected_sources": []
+          },
+          "request_chars": 116,
+          "resume_status": "workspace-mismatch",
+          "runtime_identity_mismatch_fields": [
+            "workspace_fingerprint"
+          ],
+          "secret_env_count": 0,
+          "secret_env_names": [],
+          "section_budgets": {
+            "current_request": null,
+            "history": 5200,
+            "memory": 1600,
+            "prefix": 3600,
+            "relevant_memory": 1200
+          },
+          "section_order": [
+            "prefix",
+            "memory",
+            "relevant_memory",
+            "history",
+            "current_request"
+          ],
+          "sections": {
+            "current_request": {
+              "budget_chars": null,
+              "raw_chars": 138,
+              "rendered_chars": 138
+            },
+            "history": {
+              "budget_chars": 5200,
+              "raw_chars": 417,
+              "rendered_chars": 417
+            },
+            "memory": {
+              "budget_chars": 1600,
+              "raw_chars": 218,
+              "rendered_chars": 218
+            },
+            "prefix": {
+              "budget_chars": 3600,
+              "raw_chars": 4858,
+              "rendered_chars": 3600
+            },
+            "relevant_memory": {
+              "budget_chars": 1200,
+              "raw_chars": 23,
+              "rendered_chars": 23
+            }
+          },
+          "stale_paths": [],
+          "stale_summary_invalidations": 0,
+          "text_protocol_tool_calls": 0,
+          "tool_count": 7,
+          "tool_signature": "8b879fd02e70ef1b7526181cbccfc9574b25aeefe8de28dc009ac3f163b42ff0",
+          "workspace_changed": true,
+          "workspace_chars": 1811,
+          "workspace_docs": 1,
+          "workspace_fingerprint": "9eb94a88fcc492f17048f9771db6ec2b22c52cc80cf5fde70a3b17fa15de6ead"
+        },
+        "redacted_env": {
+          "secret_env_count": 0,
+          "secret_env_names": []
+        },
+        "resume_status": "no-checkpoint",
+        "run_id": "run_20260819-022705-781c64",
+        "run_seq": 1,
+        "session_id": "20260819-022705-28178c",
+        "status": "completed",
+        "stop_reason": "final_answer_returned",
+        "task_id": "task_20260819-022705-1b4776",
+        "task_state": {
+          "attempts": 2,
+          "checkpoint_id": "ckpt_9c006b45",
+          "final_answer": "Done.",
+          "last_tool": "patch_file",
+          "resume_status": "no-checkpoint",
+          "run_id": "run_20260819-022705-781c64",
+          "run_seq": 1,
+          "session_id": "20260819-022705-28178c",
+          "status": "completed",
+          "stop_reason": "final_answer_returned",
+          "task_id": "task_20260819-022705-1b4776",
+          "tool_steps": 1,
+          "user_request": "In the README fixture, replace the placeholder opening sentence with 'This fixture is a locked benchmark workspace.'"
+        },
+        "tool_steps": 1
+      },
+      "report_relpath": "readme_intro_locked\\bench_repo_readme\\.codingforme\\runs\\run_20260819-022705-781c64\\report.json",
+      "run_dir_relpath": "readme_intro_locked\\bench_repo_readme\\.codingforme\\runs\\run_20260819-022705-781c64",
+      "run_id": "run_20260819-022705-781c64",
+      "status": "pass",
+      "step_budget": 4,
+      "step_ceiling_hit": false,
+      "stop_reason": "final_answer_returned",
+      "task_state": {
+        "attempts": 2,
+        "checkpoint_id": "ckpt_9c006b45",
+        "final_answer": "Done.",
+        "last_tool": "patch_file",
+        "resume_status": "no-checkpoint",
+        "run_id": "run_20260819-022705-781c64",
+        "run_seq": 1,
+        "session_id": "20260819-022705-28178c",
+        "status": "completed",
+        "stop_reason": "final_answer_returned",
+        "task_id": "task_20260819-022705-1b4776",
+        "tool_steps": 1,
+        "user_request": "In the README fixture, replace the placeholder opening sentence with 'This fixture is a locked benchmark workspace.'"
+      },
+      "task_state_relpath": "readme_intro_locked\\bench_repo_readme\\.codingforme\\runs\\run_20260819-022705-781c64\\task_state.json",
+      "tool_steps": 1,
+      "verifier_passed": true,
+      "within_budget": true
+    },
+    {
+      "allowed_tools": [
+        "read_file",
+        "patch_file"
+      ],
+      "artifact_digest": "sha256:9ea54cc1a8d2de44613463df1f5d6a12068079a70c1e0b7ce94f1968b5be88a6",
+      "artifact_exists": true,
+      "artifact_path": "README.md",
+      "attempts": 2,
+      "budget_enforced": true,
+      "category": "documentation",
+      "check_results": {
+        "fail_to_pass": [
+          {
+            "detail": "",
+            "kind": "file_contains",
+            "passed": true,
+            "target": "README.md"
+          },
+          {
+            "detail": "",
+            "kind": "file_not_contains",
+            "passed": true,
+            "target": "README.md"
+          }
+        ],
+        "pass_to_pass": [
+          {
+            "detail": "",
+            "kind": "file_contains",
+            "passed": true,
+            "target": "README.md"
+          },
+          {
+            "detail": "",
+            "kind": "file_contains",
+            "passed": true,
+            "target": "README.md"
+          },
+          {
+            "detail": "",
+            "kind": "file_contains",
+            "passed": true,
+            "target": "README.md"
+          },
+          {
+            "detail": "",
+            "kind": "file_contains",
+            "passed": true,
+            "target": "README.md"
+          }
+        ]
+      },
+      "checks": {
+        "fail_to_pass": [
+          {
+            "kind": "file_contains",
+            "path": "README.md",
+            "text": "schema and baseline are fixed"
+          },
+          {
+            "kind": "file_not_contains",
+            "path": "README.md",
+            "text": "- Placeholder note about the repo."
+          }
+        ],
+        "pass_to_pass": [
+          {
+            "kind": "file_contains",
+            "path": "README.md",
+            "text": "# Bench Repo README"
+          },
+          {
+            "kind": "file_contains",
+            "path": "README.md",
+            "text": "This is a placeholder benchmark fixture."
+          },
+          {
+            "kind": "file_contains",
+            "path": "README.md",
+            "text": "## Notes"
+          },
+          {
+            "kind": "file_contains",
+            "path": "README.md",
+            "text": "- Placeholder note about the file layout."
+          }
+        ]
+      },
+      "effective_max_steps": 16,
+      "expected_artifact": "README.md contains the schema and baseline note",
+      "expected_artifact_exists": true,
+      "fail_to_pass_passed": true,
+      "failure_category": null,
+      "final_answer": "Done.",
+      "fixture_copy_relpath": "readme_schema_note\\bench_repo_readme",
+      "fixture_repo": "tests/fixtures/bench_repo_readme",
+      "id": "readme_schema_note",
+      "initial_episodic_notes_empty": true,
+      "initial_history_empty": true,
+      "initial_memory_empty": true,
+      "initial_task_summary_empty": true,
+      "mutable_paths": [
+        "README.md"
+      ],
+      "non_failure_stop_reason": true,
+      "pass_to_pass_passed": true,
+      "passed": true,
+      "prompt": "Replace the first README bullet with a sentence that says the benchmark schema and baseline are fixed.",
+      "regressions": [],
+      "report": {
+        "attempts": 2,
+        "checkpoint_id": "ckpt_e83ea516",
+        "durable_promotions": [],
+        "durable_rejections": [],
+        "durable_superseded": [],
+        "final_answer": "Done.",
+        "max_steps": 16,
+        "prompt_metadata": {
+          "budget_reductions": [],
+          "current_request": {
+            "dropped_chars": 0,
+            "raw_chars": 102,
+            "rendered_chars": 102,
+            "section_chars": 124,
+            "text": "Replace the first README bullet with a sentence that says the benchmark schema and baseline are fixed.",
+            "truncated": false
+          },
+          "history": {
+            "collapsed_duplicate_reads": 0,
+            "older_entries_count": 0,
+            "raw_chars": 414,
+            "rendered_chars": 414,
+            "reused_file_summary_count": 0,
+            "summarized_tool_count": 0
+          },
+          "history_batched_turns": 0,
+          "history_chars": 402,
+          "history_tool_calls_replayed": 1,
+          "memory_chars": 204,
+          "message_count": 7,
+          "message_layout": {
+            "checkpoint_split_out": false,
+            "memory_own_message": true,
+            "name": "stable-system-v3",
+            "workspace_split_out": true
+          },
+          "message_roles": {
+            "assistant": 1,
+            "system": 1,
+            "tool": 1,
+            "user": 4
+          },
+          "messages_chars": 4171,
+          "native_tool_calls": true,
+          "prefix_changed": true,
+          "prefix_chars": 4435,
+          "prefix_hash": "8362c029f5e388a6dd9d1d6268236acdc24c61c09ff4c3516225a67842537c40",
+          "prompt_budget_chars": 12000,
+          "prompt_cache_key": "8362c029f5e388a6dd9d1d6268236acdc24c61c09ff4c3516225a67842537c40",
+          "prompt_cache_supported": false,
+          "prompt_chars": 4373,
+          "prompt_over_budget": false,
+          "recent_commits": 4,
+          "reduction_order": [
+            "relevant_memory",
+            "history",
+            "memory",
+            "prefix"
+          ],
+          "relevant_memory": {
+            "limit": 3,
+            "raw_chars": 23,
+            "rendered_chars": 23,
+            "rendered_count": 0,
+            "rendered_notes": [],
+            "selected_count": 0,
+            "selected_durable_count": 0,
+            "selected_kinds": [],
+            "selected_notes": [],
+            "selected_sources": []
+          },
+          "request_chars": 102,
+          "resume_status": "workspace-mismatch",
+          "runtime_identity_mismatch_fields": [
+            "workspace_fingerprint"
+          ],
+          "secret_env_count": 0,
+          "secret_env_names": [],
+          "section_budgets": {
+            "current_request": null,
+            "history": 5200,
+            "memory": 1600,
+            "prefix": 3600,
+            "relevant_memory": 1200
+          },
+          "section_order": [
+            "prefix",
+            "memory",
+            "relevant_memory",
+            "history",
+            "current_request"
+          ],
+          "sections": {
+            "current_request": {
+              "budget_chars": null,
+              "raw_chars": 124,
+              "rendered_chars": 124
+            },
+            "history": {
+              "budget_chars": 5200,
+              "raw_chars": 414,
+              "rendered_chars": 414
+            },
+            "memory": {
+              "budget_chars": 1600,
+              "raw_chars": 204,
+              "rendered_chars": 204
+            },
+            "prefix": {
+              "budget_chars": 3600,
+              "raw_chars": 4835,
+              "rendered_chars": 3600
+            },
+            "relevant_memory": {
+              "budget_chars": 1200,
+              "raw_chars": 23,
+              "rendered_chars": 23
+            }
+          },
+          "stale_paths": [],
+          "stale_summary_invalidations": 0,
+          "text_protocol_tool_calls": 0,
+          "tool_count": 7,
+          "tool_signature": "8b879fd02e70ef1b7526181cbccfc9574b25aeefe8de28dc009ac3f163b42ff0",
+          "workspace_changed": true,
+          "workspace_chars": 1816,
+          "workspace_docs": 1,
+          "workspace_fingerprint": "759c92a9c8ea4cf33537034757c29a30848e89a2469d5e84c0206268eac95fc2"
+        },
+        "redacted_env": {
+          "secret_env_count": 0,
+          "secret_env_names": []
+        },
+        "resume_status": "no-checkpoint",
+        "run_id": "run_20260819-022706-4ea72e",
+        "run_seq": 1,
+        "session_id": "20260819-022706-5f7a04",
+        "status": "completed",
+        "stop_reason": "final_answer_returned",
+        "task_id": "task_20260819-022706-c20eb8",
+        "task_state": {
+          "attempts": 2,
+          "checkpoint_id": "ckpt_e83ea516",
+          "final_answer": "Done.",
+          "last_tool": "patch_file",
+          "resume_status": "no-checkpoint",
+          "run_id": "run_20260819-022706-4ea72e",
+          "run_seq": 1,
+          "session_id": "20260819-022706-5f7a04",
+          "status": "completed",
+          "stop_reason": "final_answer_returned",
+          "task_id": "task_20260819-022706-c20eb8",
+          "tool_steps": 1,
+          "user_request": "Replace the first README bullet with a sentence that says the benchmark schema and baseline are fixed."
+        },
+        "tool_steps": 1
+      },
+      "report_relpath": "readme_schema_note\\bench_repo_readme\\.codingforme\\runs\\run_20260819-022706-4ea72e\\report.json",
+      "run_dir_relpath": "readme_schema_note\\bench_repo_readme\\.codingforme\\runs\\run_20260819-022706-4ea72e",
+      "run_id": "run_20260819-022706-4ea72e",
+      "status": "pass",
+      "step_budget": 4,
+      "step_ceiling_hit": false,
+      "stop_reason": "final_answer_returned",
+      "task_state": {
+        "attempts": 2,
+        "checkpoint_id": "ckpt_e83ea516",
+        "final_answer": "Done.",
+        "last_tool": "patch_file",
+        "resume_status": "no-checkpoint",
+        "run_id": "run_20260819-022706-4ea72e",
+        "run_seq": 1,
+        "session_id": "20260819-022706-5f7a04",
+        "status": "completed",
+        "stop_reason": "final_answer_returned",
+        "task_id": "task_20260819-022706-c20eb8",
+        "tool_steps": 1,
+        "user_request": "Replace the first README bullet with a sentence that says the benchmark schema and baseline are fixed."
+      },
+      "task_state_relpath": "readme_schema_note\\bench_repo_readme\\.codingforme\\runs\\run_20260819-022706-4ea72e\\task_state.json",
+      "tool_steps": 1,
+      "verifier_passed": true,
+      "within_budget": true
+    },
+    {
+      "allowed_tools": [
+        "read_file",
+        "patch_file"
+      ],
+      "artifact_digest": "sha256:e8d7526c3da15e9570bc6db4f097e672ef50b1c19e82de5b4c074d9e87362e2e",
+      "artifact_exists": true,
+      "artifact_path": "sample.txt",
+      "attempts": 2,
+      "budget_enforced": true,
+      "category": "text-edit",
+      "check_results": {
+        "fail_to_pass": [
+          {
+            "detail": "",
+            "kind": "file_contains",
+            "passed": true,
+            "target": "sample.txt"
+          },
+          {
+            "detail": "",
+            "kind": "file_not_contains",
+            "passed": true,
+            "target": "sample.txt"
+          }
+        ],
+        "pass_to_pass": [
+          {
+            "detail": "",
+            "kind": "file_contains",
+            "passed": true,
+            "target": "sample.txt"
+          },
+          {
+            "detail": "",
+            "kind": "file_contains",
+            "passed": true,
+            "target": "sample.txt"
+          },
+          {
+            "detail": "",
+            "kind": "file_contains",
+            "passed": true,
+            "target": "sample.txt"
+          }
+        ]
+      },
+      "checks": {
+        "fail_to_pass": [
+          {
+            "kind": "file_contains",
+            "path": "sample.txt",
+            "text": "beta-locked"
+          },
+          {
+            "kind": "file_not_contains",
+            "path": "sample.txt",
+            "text": "\nbeta\n"
+          }
+        ],
+        "pass_to_pass": [
+          {
+            "kind": "file_contains",
+            "path": "sample.txt",
+            "text": "alpha\n"
+          },
+          {
+            "kind": "file_contains",
+            "path": "sample.txt",
+            "text": "\ngamma\n"
+          },
+          {
+            "kind": "file_contains",
+            "path": "sample.txt",
+            "text": "placeholder"
+          }
+        ]
+      },
+      "effective_max_steps": 16,
+      "expected_artifact": "sample.txt contains beta-locked",
+      "expected_artifact_exists": true,
+      "fail_to_pass_passed": true,
+      "failure_category": null,
+      "final_answer": "Done.",
+      "fixture_copy_relpath": "sample_beta_locked\\bench_repo_patch",
+      "fixture_repo": "tests/fixtures/bench_repo_patch",
+      "id": "sample_beta_locked",
+      "initial_episodic_notes_empty": true,
+      "initial_history_empty": true,
+      "initial_memory_empty": true,
+      "initial_task_summary_empty": true,
+      "mutable_paths": [
+        "sample.txt"
+      ],
+      "non_failure_stop_reason": true,
+      "pass_to_pass_passed": true,
+      "passed": true,
+      "prompt": "In sample.txt, replace beta with beta-locked.",
+      "regressions": [],
+      "report": {
+        "attempts": 2,
+        "checkpoint_id": "ckpt_26b10d89",
+        "durable_promotions": [],
+        "durable_rejections": [],
+        "durable_superseded": [],
+        "final_answer": "Done.",
+        "max_steps": 16,
+        "prompt_metadata": {
+          "budget_reductions": [],
+          "current_request": {
+            "dropped_chars": 0,
+            "raw_chars": 45,
+            "rendered_chars": 45,
+            "section_chars": 67,
+            "text": "In sample.txt, replace beta with beta-locked.",
+            "truncated": false
+          },
+          "history": {
+            "collapsed_duplicate_reads": 0,
+            "older_entries_count": 0,
+            "raw_chars": 231,
+            "rendered_chars": 231,
+            "reused_file_summary_count": 0,
+            "summarized_tool_count": 0
+          },
+          "history_batched_turns": 0,
+          "history_chars": 219,
+          "history_tool_calls_replayed": 1,
+          "memory_chars": 148,
+          "message_count": 7,
+          "message_layout": {
+            "checkpoint_split_out": false,
+            "memory_own_message": true,
+            "name": "stable-system-v3",
+            "workspace_split_out": true
+          },
+          "message_roles": {
+            "assistant": 1,
+            "system": 1,
+            "tool": 1,
+            "user": 4
+          },
+          "messages_chars": 3939,
+          "native_tool_calls": true,
+          "prefix_changed": false,
+          "prefix_chars": 4265,
+          "prefix_hash": "1e87d0fc8218eb28a7d7228d4c094b0dc6d8a601a338f83cc35f0c618c1ae874",
+          "prompt_budget_chars": 12000,
+          "prompt_cache_key": "1e87d0fc8218eb28a7d7228d4c094b0dc6d8a601a338f83cc35f0c618c1ae874",
+          "prompt_cache_supported": false,
+          "prompt_chars": 4077,
+          "prompt_over_budget": false,
+          "recent_commits": 4,
+          "reduction_order": [
+            "relevant_memory",
+            "history",
+            "memory",
+            "prefix"
+          ],
+          "relevant_memory": {
+            "limit": 3,
+            "raw_chars": 23,
+            "rendered_chars": 23,
+            "rendered_count": 0,
+            "rendered_notes": [],
+            "selected_count": 0,
+            "selected_durable_count": 0,
+            "selected_kinds": [],
+            "selected_notes": [],
+            "selected_sources": []
+          },
+          "request_chars": 45,
+          "resume_status": "full-valid",
+          "runtime_identity_mismatch_fields": [],
+          "secret_env_count": 0,
+          "secret_env_names": [],
+          "section_budgets": {
+            "current_request": null,
+            "history": 5200,
+            "memory": 1600,
+            "prefix": 3600,
+            "relevant_memory": 1200
+          },
+          "section_order": [
+            "prefix",
+            "memory",
+            "relevant_memory",
+            "history",
+            "current_request"
+          ],
+          "sections": {
+            "current_request": {
+              "budget_chars": null,
+              "raw_chars": 67,
+              "rendered_chars": 67
+            },
+            "history": {
+              "budget_chars": 5200,
+              "raw_chars": 231,
+              "rendered_chars": 231
+            },
+            "memory": {
+              "budget_chars": 1600,
+              "raw_chars": 148,
+              "rendered_chars": 148
+            },
+            "prefix": {
+              "budget_chars": 3600,
+              "raw_chars": 4544,
+              "rendered_chars": 3600
+            },
+            "relevant_memory": {
+              "budget_chars": 1200,
+              "raw_chars": 23,
+              "rendered_chars": 23
+            }
+          },
+          "stale_paths": [],
+          "stale_summary_invalidations": 0,
+          "text_protocol_tool_calls": 0,
+          "tool_count": 7,
+          "tool_signature": "8b879fd02e70ef1b7526181cbccfc9574b25aeefe8de28dc009ac3f163b42ff0",
+          "workspace_changed": false,
+          "workspace_chars": 1646,
+          "workspace_docs": 0,
+          "workspace_fingerprint": "7d5eaa94884a8b4d680a78e2830754a0cac4bc30be95ce7d61edd93f5849c5fc"
+        },
+        "redacted_env": {
+          "secret_env_count": 0,
+          "secret_env_names": []
+        },
+        "resume_status": "no-checkpoint",
+        "run_id": "run_20260819-022706-95fda1",
+        "run_seq": 1,
+        "session_id": "20260819-022706-94679e",
+        "status": "completed",
+        "stop_reason": "final_answer_returned",
+        "task_id": "task_20260819-022706-710a92",
+        "task_state": {
+          "attempts": 2,
+          "checkpoint_id": "ckpt_26b10d89",
+          "final_answer": "Done.",
+          "last_tool": "patch_file",
+          "resume_status": "no-checkpoint",
+          "run_id": "run_20260819-022706-95fda1",
+          "run_seq": 1,
+          "session_id": "20260819-022706-94679e",
+          "status": "completed",
+          "stop_reason": "final_answer_returned",
+          "task_id": "task_20260819-022706-710a92",
+          "tool_steps": 1,
+          "user_request": "In sample.txt, replace beta with beta-locked."
+        },
+        "tool_steps": 1
+      },
+      "report_relpath": "sample_beta_locked\\bench_repo_patch\\.codingforme\\runs\\run_20260819-022706-95fda1\\report.json",
+      "run_dir_relpath": "sample_beta_locked\\bench_repo_patch\\.codingforme\\runs\\run_20260819-022706-95fda1",
+      "run_id": "run_20260819-022706-95fda1",
+      "status": "pass",
+      "step_budget": 4,
+      "step_ceiling_hit": false,
+      "stop_reason": "final_answer_returned",
+      "task_state": {
+        "attempts": 2,
+        "checkpoint_id": "ckpt_26b10d89",
+        "final_answer": "Done.",
+        "last_tool": "patch_file",
+        "resume_status": "no-checkpoint",
+        "run_id": "run_20260819-022706-95fda1",
+        "run_seq": 1,
+        "session_id": "20260819-022706-94679e",
+        "status": "completed",
+        "stop_reason": "final_answer_returned",
+        "task_id": "task_20260819-022706-710a92",
+        "tool_steps": 1,
+        "user_request": "In sample.txt, replace beta with beta-locked."
+      },
+      "task_state_relpath": "sample_beta_locked\\bench_repo_patch\\.codingforme\\runs\\run_20260819-022706-95fda1\\task_state.json",
+      "tool_steps": 1,
+      "verifier_passed": true,
+      "within_budget": true
+    },
+    {
+      "allowed_tools": [
+        "read_file",
+        "patch_file"
+      ],
+      "artifact_digest": "sha256:3d30e7712c8f62c1a30f60f805195f645c7b9b49f8d64cfbe14c7c4a3eba9f90",
+      "artifact_exists": true,
+      "artifact_path": "sample.txt",
+      "attempts": 2,
+      "budget_enforced": true,
+      "category": "text-edit",
+      "check_results": {
+        "fail_to_pass": [
+          {
+            "detail": "",
+            "kind": "file_contains",
+            "passed": true,
+            "target": "sample.txt"
+          },
+          {
+            "detail": "",
+            "kind": "file_not_contains",
+            "passed": true,
+            "target": "sample.txt"
+          }
+        ],
+        "pass_to_pass": [
+          {
+            "detail": "",
+            "kind": "file_contains",
+            "passed": true,
+            "target": "sample.txt"
+          },
+          {
+            "detail": "",
+            "kind": "file_contains",
+            "passed": true,
+            "target": "sample.txt"
+          },
+          {
+            "detail": "",
+            "kind": "file_contains",
+            "passed": true,
+            "target": "sample.txt"
+          }
+        ]
+      },
+      "checks": {
+        "fail_to_pass": [
+          {
+            "kind": "file_contains",
+            "path": "sample.txt",
+            "text": "gamma-locked"
+          },
+          {
+            "kind": "file_not_contains",
+            "path": "sample.txt",
+            "text": "\ngamma\n"
+          }
+        ],
+        "pass_to_pass": [
+          {
+            "kind": "file_contains",
+            "path": "sample.txt",
+            "text": "alpha\n"
+          },
+          {
+            "kind": "file_contains",
+            "path": "sample.txt",
+            "text": "\nbeta\n"
+          },
+          {
+            "kind": "file_contains",
+            "path": "sample.txt",
+            "text": "placeholder"
+          }
+        ]
+      },
+      "effective_max_steps": 16,
+      "expected_artifact": "sample.txt contains gamma-locked",
+      "expected_artifact_exists": true,
+      "fail_to_pass_passed": true,
+      "failure_category": null,
+      "final_answer": "Done.",
+      "fixture_copy_relpath": "sample_gamma_locked\\bench_repo_patch",
+      "fixture_repo": "tests/fixtures/bench_repo_patch",
+      "id": "sample_gamma_locked",
+      "initial_episodic_notes_empty": true,
+      "initial_history_empty": true,
+      "initial_memory_empty": true,
+      "initial_task_summary_empty": true,
+      "mutable_paths": [
+        "sample.txt"
+      ],
+      "non_failure_stop_reason": true,
+      "pass_to_pass_passed": true,
+      "passed": true,
+      "prompt": "In sample.txt, replace gamma with gamma-locked.",
+      "regressions": [],
+      "report": {
+        "attempts": 2,
+        "checkpoint_id": "ckpt_d186d213",
+        "durable_promotions": [],
+        "durable_rejections": [],
+        "durable_superseded": [],
+        "final_answer": "Done.",
+        "max_steps": 16,
+        "prompt_metadata": {
+          "budget_reductions": [],
+          "current_request": {
+            "dropped_chars": 0,
+            "raw_chars": 47,
+            "rendered_chars": 47,
+            "section_chars": 69,
+            "text": "In sample.txt, replace gamma with gamma-locked.",
+            "truncated": false
+          },
+          "history": {
+            "collapsed_duplicate_reads": 0,
+            "older_entries_count": 0,
+            "raw_chars": 235,
+            "rendered_chars": 235,
+            "reused_file_summary_count": 0,
+            "summarized_tool_count": 0
+          },
+          "history_batched_turns": 0,
+          "history_chars": 223,
+          "history_tool_calls_replayed": 1,
+          "memory_chars": 150,
+          "message_count": 7,
+          "message_layout": {
+            "checkpoint_split_out": false,
+            "memory_own_message": true,
+            "name": "stable-system-v3",
+            "workspace_split_out": true
+          },
+          "message_roles": {
+            "assistant": 1,
+            "system": 1,
+            "tool": 1,
+            "user": 4
+          },
+          "messages_chars": 3945,
+          "native_tool_calls": true,
+          "prefix_changed": false,
+          "prefix_chars": 4267,
+          "prefix_hash": "317b0fd106fd33f85eb5a106d88405f6c75d6186a245c37dee0caa6c6fb2a26d",
+          "prompt_budget_chars": 12000,
+          "prompt_cache_key": "317b0fd106fd33f85eb5a106d88405f6c75d6186a245c37dee0caa6c6fb2a26d",
+          "prompt_cache_supported": false,
+          "prompt_chars": 4085,
+          "prompt_over_budget": false,
+          "recent_commits": 4,
+          "reduction_order": [
+            "relevant_memory",
+            "history",
+            "memory",
+            "prefix"
+          ],
+          "relevant_memory": {
+            "limit": 3,
+            "raw_chars": 23,
+            "rendered_chars": 23,
+            "rendered_count": 0,
+            "rendered_notes": [],
+            "selected_count": 0,
+            "selected_durable_count": 0,
+            "selected_kinds": [],
+            "selected_notes": [],
+            "selected_sources": []
+          },
+          "request_chars": 47,
+          "resume_status": "full-valid",
+          "runtime_identity_mismatch_fields": [],
+          "secret_env_count": 0,
+          "secret_env_names": [],
+          "section_budgets": {
+            "current_request": null,
+            "history": 5200,
+            "memory": 1600,
+            "prefix": 3600,
+            "relevant_memory": 1200
+          },
+          "section_order": [
+            "prefix",
+            "memory",
+            "relevant_memory",
+            "history",
+            "current_request"
+          ],
+          "sections": {
+            "current_request": {
+              "budget_chars": null,
+              "raw_chars": 69,
+              "rendered_chars": 69
+            },
+            "history": {
+              "budget_chars": 5200,
+              "raw_chars": 235,
+              "rendered_chars": 235
+            },
+            "memory": {
+              "budget_chars": 1600,
+              "raw_chars": 150,
+              "rendered_chars": 150
+            },
+            "prefix": {
+              "budget_chars": 3600,
+              "raw_chars": 4550,
+              "rendered_chars": 3600
+            },
+            "relevant_memory": {
+              "budget_chars": 1200,
+              "raw_chars": 23,
+              "rendered_chars": 23
+            }
+          },
+          "stale_paths": [],
+          "stale_summary_invalidations": 0,
+          "text_protocol_tool_calls": 0,
+          "tool_count": 7,
+          "tool_signature": "8b879fd02e70ef1b7526181cbccfc9574b25aeefe8de28dc009ac3f163b42ff0",
+          "workspace_changed": false,
+          "workspace_chars": 1648,
+          "workspace_docs": 0,
+          "workspace_fingerprint": "c1500a13d6853d9b2d81893d5ade89695a675a04dca27059aa97aa461329738b"
+        },
+        "redacted_env": {
+          "secret_env_count": 0,
+          "secret_env_names": []
+        },
+        "resume_status": "no-checkpoint",
+        "run_id": "run_20260819-022706-409ee8",
+        "run_seq": 1,
+        "session_id": "20260819-022706-769a61",
+        "status": "completed",
+        "stop_reason": "final_answer_returned",
+        "task_id": "task_20260819-022706-8c730f",
+        "task_state": {
+          "attempts": 2,
+          "checkpoint_id": "ckpt_d186d213",
+          "final_answer": "Done.",
+          "last_tool": "patch_file",
+          "resume_status": "no-checkpoint",
+          "run_id": "run_20260819-022706-409ee8",
+          "run_seq": 1,
+          "session_id": "20260819-022706-769a61",
+          "status": "completed",
+          "stop_reason": "final_answer_returned",
+          "task_id": "task_20260819-022706-8c730f",
+          "tool_steps": 1,
+          "user_request": "In sample.txt, replace gamma with gamma-locked."
+        },
+        "tool_steps": 1
+      },
+      "report_relpath": "sample_gamma_locked\\bench_repo_patch\\.codingforme\\runs\\run_20260819-022706-409ee8\\report.json",
+      "run_dir_relpath": "sample_gamma_locked\\bench_repo_patch\\.codingforme\\runs\\run_20260819-022706-409ee8",
+      "run_id": "run_20260819-022706-409ee8",
+      "status": "pass",
+      "step_budget": 4,
+      "step_ceiling_hit": false,
+      "stop_reason": "final_answer_returned",
+      "task_state": {
+        "attempts": 2,
+        "checkpoint_id": "ckpt_d186d213",
+        "final_answer": "Done.",
+        "last_tool": "patch_file",
+        "resume_status": "no-checkpoint",
+        "run_id": "run_20260819-022706-409ee8",
+        "run_seq": 1,
+        "session_id": "20260819-022706-769a61",
+        "status": "completed",
+        "stop_reason": "final_answer_returned",
+        "task_id": "task_20260819-022706-8c730f",
+        "tool_steps": 1,
+        "user_request": "In sample.txt, replace gamma with gamma-locked."
+      },
+      "task_state_relpath": "sample_gamma_locked\\bench_repo_patch\\.codingforme\\runs\\run_20260819-022706-409ee8\\task_state.json",
+      "tool_steps": 1,
+      "verifier_passed": true,
+      "within_budget": true
+    },
+    {
+      "allowed_tools": [
+        "patch_file",
+        "read_file"
+      ],
+      "artifact_digest": "sha256:9ad729508c958838fc925fca0c84516ad52f0395c79998db89f750b248d757e8",
+      "artifact_exists": true,
+      "artifact_path": "README.md",
+      "attempts": 3,
+      "budget_enforced": true,
+      "category": "tool-boundary",
+      "check_results": {
+        "fail_to_pass": [
+          {
+            "detail": "",
+            "kind": "file_contains",
+            "passed": true,
+            "target": "README.md"
+          },
+          {
+            "detail": "",
+            "kind": "file_not_contains",
+            "passed": true,
+            "target": "README.md"
+          }
+        ],
+        "pass_to_pass": [
+          {
+            "detail": "",
+            "kind": "file_contains",
+            "passed": true,
+            "target": "README.md"
+          },
+          {
+            "detail": "",
+            "kind": "file_contains",
+            "passed": true,
+            "target": "README.md"
+          },
+          {
+            "detail": "",
+            "kind": "file_contains",
+            "passed": true,
+            "target": "README.md"
+          },
+          {
+            "detail": "",
+            "kind": "file_contains",
+            "passed": true,
+            "target": "README.md"
+          }
+        ]
+      },
+      "checks": {
+        "fail_to_pass": [
+          {
+            "kind": "file_contains",
+            "path": "README.md",
+            "text": "recovered after invalid patch args"
+          },
+          {
+            "kind": "file_not_contains",
+            "path": "README.md",
+            "text": "This is a placeholder benchmark fixture."
+          }
+        ],
+        "pass_to_pass": [
+          {
+            "kind": "file_contains",
+            "path": "README.md",
+            "text": "# Bench Repo README"
+          },
+          {
+            "kind": "file_contains",
+            "path": "README.md",
+            "text": "## Notes"
+          },
+          {
+            "kind": "file_contains",
+            "path": "README.md",
+            "text": "- Placeholder note about the repo."
+          },
+          {
+            "kind": "file_contains",
+            "path": "README.md",
+            "text": "- Placeholder note about the file layout."
+          }
+        ]
+      },
+      "effective_max_steps": 16,
+      "expected_artifact": "README.md reflects recovery after invalid patch args",
+      "expected_artifact_exists": true,
+      "fail_to_pass_passed": true,
+      "failure_category": null,
+      "final_answer": "Done.",
+      "fixture_copy_relpath": "invalid_patch_recovery\\bench_repo_readme",
+      "fixture_repo": "tests/fixtures/bench_repo_readme",
+      "id": "invalid_patch_recovery",
+      "initial_episodic_notes_empty": true,
+      "initial_history_empty": true,
+      "initial_memory_empty": true,
+      "initial_task_summary_empty": true,
+      "mutable_paths": [
+        "README.md"
+      ],
+      "non_failure_stop_reason": true,
+      "pass_to_pass_passed": true,
+      "passed": true,
+      "prompt": "Recover after invalid patch arguments and finish the README patch.",
+      "regressions": [],
+      "report": {
+        "attempts": 3,
+        "checkpoint_id": "ckpt_e0b75f78",
+        "durable_promotions": [],
+        "durable_rejections": [],
+        "durable_superseded": [],
+        "final_answer": "Done.",
+        "max_steps": 16,
+        "prompt_metadata": {
+          "budget_reductions": [],
+          "current_request": {
+            "dropped_chars": 0,
+            "raw_chars": 66,
+            "rendered_chars": 66,
+            "section_chars": 88,
+            "text": "Recover after invalid patch arguments and finish the README patch.",
+            "truncated": false
+          },
+          "history": {
+            "collapsed_duplicate_reads": 0,
+            "older_entries_count": 0,
+            "raw_chars": 626,
+            "rendered_chars": 626,
+            "reused_file_summary_count": 0,
+            "summarized_tool_count": 0
+          },
+          "history_batched_turns": 0,
+          "history_chars": 614,
+          "history_tool_calls_replayed": 2,
+          "memory_chars": 168,
+          "message_count": 9,
+          "message_layout": {
+            "checkpoint_split_out": false,
+            "memory_own_message": true,
+            "name": "stable-system-v3",
+            "workspace_split_out": true
+          },
+          "message_roles": {
+            "assistant": 2,
+            "system": 1,
+            "tool": 2,
+            "user": 4
+          },
+          "messages_chars": 4206,
+          "native_tool_calls": true,
+          "prefix_changed": true,
+          "prefix_chars": 4439,
+          "prefix_hash": "821d4d11cd468e0a01852ff64f595520d06bad67b15a7e4fe3035252ac72a153",
+          "prompt_budget_chars": 12000,
+          "prompt_cache_key": "821d4d11cd468e0a01852ff64f595520d06bad67b15a7e4fe3035252ac72a153",
+          "prompt_cache_supported": false,
+          "prompt_chars": 4513,
+          "prompt_over_budget": false,
+          "recent_commits": 4,
+          "reduction_order": [
+            "relevant_memory",
+            "history",
+            "memory",
+            "prefix"
+          ],
+          "relevant_memory": {
+            "limit": 3,
+            "raw_chars": 23,
+            "rendered_chars": 23,
+            "rendered_count": 0,
+            "rendered_notes": [],
+            "selected_count": 0,
+            "selected_durable_count": 0,
+            "selected_kinds": [],
+            "selected_notes": [],
+            "selected_sources": []
+          },
+          "request_chars": 66,
+          "resume_status": "workspace-mismatch",
+          "runtime_identity_mismatch_fields": [
+            "workspace_fingerprint"
+          ],
+          "secret_env_count": 0,
+          "secret_env_names": [],
+          "section_budgets": {
+            "current_request": null,
+            "history": 5200,
+            "memory": 1600,
+            "prefix": 3600,
+            "relevant_memory": 1200
+          },
+          "section_order": [
+            "prefix",
+            "memory",
+            "relevant_memory",
+            "history",
+            "current_request"
+          ],
+          "sections": {
+            "current_request": {
+              "budget_chars": null,
+              "raw_chars": 88,
+              "rendered_chars": 88
+            },
+            "history": {
+              "budget_chars": 5200,
+              "raw_chars": 626,
+              "rendered_chars": 626
+            },
+            "memory": {
+              "budget_chars": 1600,
+              "raw_chars": 168,
+              "rendered_chars": 168
+            },
+            "prefix": {
+              "budget_chars": 3600,
+              "raw_chars": 4767,
+              "rendered_chars": 3600
+            },
+            "relevant_memory": {
+              "budget_chars": 1200,
+              "raw_chars": 23,
+              "rendered_chars": 23
+            }
+          },
+          "stale_paths": [],
+          "stale_summary_invalidations": 0,
+          "text_protocol_tool_calls": 0,
+          "tool_count": 7,
+          "tool_signature": "8b879fd02e70ef1b7526181cbccfc9574b25aeefe8de28dc009ac3f163b42ff0",
+          "workspace_changed": true,
+          "workspace_chars": 1820,
+          "workspace_docs": 1,
+          "workspace_fingerprint": "1b5ab1df079470c20dff4c6200ecab97909ec726bbbd518ede076999a71c2c7d"
+        },
+        "redacted_env": {
+          "secret_env_count": 0,
+          "secret_env_names": []
+        },
+        "resume_status": "no-checkpoint",
+        "run_id": "run_20260819-022706-5ec7b9",
+        "run_seq": 1,
+        "session_id": "20260819-022706-07ecd4",
+        "status": "completed",
+        "stop_reason": "final_answer_returned",
+        "task_id": "task_20260819-022706-9e8223",
+        "task_state": {
+          "attempts": 3,
+          "checkpoint_id": "ckpt_e0b75f78",
+          "final_answer": "Done.",
+          "last_tool": "patch_file",
+          "resume_status": "no-checkpoint",
+          "run_id": "run_20260819-022706-5ec7b9",
+          "run_seq": 1,
+          "session_id": "20260819-022706-07ecd4",
+          "status": "completed",
+          "stop_reason": "final_answer_returned",
+          "task_id": "task_20260819-022706-9e8223",
+          "tool_steps": 2,
+          "user_request": "Recover after invalid patch arguments and finish the README patch."
+        },
+        "tool_steps": 2
+      },
+      "report_relpath": "invalid_patch_recovery\\bench_repo_readme\\.codingforme\\runs\\run_20260819-022706-5ec7b9\\report.json",
+      "run_dir_relpath": "invalid_patch_recovery\\bench_repo_readme\\.codingforme\\runs\\run_20260819-022706-5ec7b9",
+      "run_id": "run_20260819-022706-5ec7b9",
+      "status": "pass",
+      "step_budget": 5,
+      "step_ceiling_hit": false,
+      "stop_reason": "final_answer_returned",
+      "task_state": {
+        "attempts": 3,
+        "checkpoint_id": "ckpt_e0b75f78",
+        "final_answer": "Done.",
+        "last_tool": "patch_file",
+        "resume_status": "no-checkpoint",
+        "run_id": "run_20260819-022706-5ec7b9",
+        "run_seq": 1,
+        "session_id": "20260819-022706-07ecd4",
+        "status": "completed",
+        "stop_reason": "final_answer_returned",
+        "task_id": "task_20260819-022706-9e8223",
+        "tool_steps": 2,
+        "user_request": "Recover after invalid patch arguments and finish the README patch."
+      },
+      "task_state_relpath": "invalid_patch_recovery\\bench_repo_readme\\.codingforme\\runs\\run_20260819-022706-5ec7b9\\task_state.json",
+      "tool_steps": 2,
+      "verifier_passed": true,
+      "within_budget": true
+    },
+    {
+      "allowed_tools": [
+        "read_file",
+        "patch_file"
+      ],
+      "artifact_digest": "sha256:f6562c2f0a1925bfba2888ff6d8e5ba0a60e6a3f58e9fcdf05f2cbd8d60926cd",
+      "artifact_exists": true,
+      "artifact_path": "sample.txt",
+      "attempts": 3,
+      "budget_enforced": true,
+      "category": "tool-boundary",
+      "check_results": {
+        "fail_to_pass": [
+          {
+            "detail": "",
+            "kind": "file_contains",
+            "passed": true,
+            "target": "sample.txt"
+          },
+          {
+            "detail": "",
+            "kind": "file_not_contains",
+            "passed": true,
+            "target": "sample.txt"
+          }
+        ],
+        "pass_to_pass": [
+          {
+            "detail": "",
+            "kind": "file_contains",
+            "passed": true,
+            "target": "sample.txt"
+          },
+          {
+            "detail": "",
+            "kind": "file_contains",
+            "passed": true,
+            "target": "sample.txt"
+          },
+          {
+            "detail": "",
+            "kind": "file_contains",
+            "passed": true,
+            "target": "sample.txt"
+          }
+        ]
+      },
+      "checks": {
+        "fail_to_pass": [
+          {
+            "kind": "file_contains",
+            "path": "sample.txt",
+            "text": "alpha-guarded"
+          },
+          {
+            "kind": "file_not_contains",
+            "path": "sample.txt",
+            "text": "alpha\nbeta"
+          }
+        ],
+        "pass_to_pass": [
+          {
+            "kind": "file_contains",
+            "path": "sample.txt",
+            "text": "\nbeta\n"
+          },
+          {
+            "kind": "file_contains",
+            "path": "sample.txt",
+            "text": "\ngamma\n"
+          },
+          {
+            "kind": "file_contains",
+            "path": "sample.txt",
+            "text": "placeholder"
+          }
+        ]
+      },
+      "effective_max_steps": 16,
+      "expected_artifact": "sample.txt reflects recovery after path escape rejection",
+      "expected_artifact_exists": true,
+      "fail_to_pass_passed": true,
+      "failure_category": null,
+      "final_answer": "Done.",
+      "fixture_copy_relpath": "path_escape_recovery\\bench_repo_patch",
+      "fixture_repo": "tests/fixtures/bench_repo_patch",
+      "id": "path_escape_recovery",
+      "initial_episodic_notes_empty": true,
+      "initial_history_empty": true,
+      "initial_memory_empty": true,
+      "initial_task_summary_empty": true,
+      "mutable_paths": [
+        "sample.txt"
+      ],
+      "non_failure_stop_reason": true,
+      "pass_to_pass_passed": true,
+      "passed": true,
+      "prompt": "Reject a path escape attempt and still finish the sample.txt patch.",
+      "regressions": [],
+      "report": {
+        "attempts": 3,
+        "checkpoint_id": "ckpt_56e68434",
+        "durable_promotions": [],
+        "durable_rejections": [],
+        "durable_superseded": [],
+        "final_answer": "Done.",
+        "max_steps": 16,
+        "prompt_metadata": {
+          "budget_reductions": [],
+          "current_request": {
+            "dropped_chars": 0,
+            "raw_chars": 67,
+            "rendered_chars": 67,
+            "section_chars": 89,
+            "text": "Reject a path escape attempt and still finish the sample.txt patch.",
+            "truncated": false
+          },
+          "history": {
+            "collapsed_duplicate_reads": 0,
+            "older_entries_count": 0,
+            "raw_chars": 565,
+            "rendered_chars": 565,
+            "reused_file_summary_count": 0,
+            "summarized_tool_count": 0
+          },
+          "history_batched_turns": 0,
+          "history_chars": 553,
+          "history_tool_calls_replayed": 2,
+          "memory_chars": 170,
+          "message_count": 9,
+          "message_layout": {
+            "checkpoint_split_out": false,
+            "memory_own_message": true,
+            "name": "stable-system-v3",
+            "workspace_split_out": true
+          },
+          "message_roles": {
+            "assistant": 2,
+            "system": 1,
+            "tool": 2,
+            "user": 4
+          },
+          "messages_chars": 4247,
+          "native_tool_calls": true,
+          "prefix_changed": false,
+          "prefix_chars": 4269,
+          "prefix_hash": "eb1b430c868f5c79440bead3f65a6f4c1b2b35cb0c807268f9d38a774e0f3437",
+          "prompt_budget_chars": 12000,
+          "prompt_cache_key": "eb1b430c868f5c79440bead3f65a6f4c1b2b35cb0c807268f9d38a774e0f3437",
+          "prompt_cache_supported": false,
+          "prompt_chars": 4455,
+          "prompt_over_budget": false,
+          "recent_commits": 4,
+          "reduction_order": [
+            "relevant_memory",
+            "history",
+            "memory",
+            "prefix"
+          ],
+          "relevant_memory": {
+            "limit": 3,
+            "raw_chars": 23,
+            "rendered_chars": 23,
+            "rendered_count": 0,
+            "rendered_notes": [],
+            "selected_count": 0,
+            "selected_durable_count": 0,
+            "selected_kinds": [],
+            "selected_notes": [],
+            "selected_sources": []
+          },
+          "request_chars": 67,
+          "resume_status": "full-valid",
+          "runtime_identity_mismatch_fields": [],
+          "secret_env_count": 0,
+          "secret_env_names": [],
+          "section_budgets": {
+            "current_request": null,
+            "history": 5200,
+            "memory": 1600,
+            "prefix": 3600,
+            "relevant_memory": 1200
+          },
+          "section_order": [
+            "prefix",
+            "memory",
+            "relevant_memory",
+            "history",
+            "current_request"
+          ],
+          "sections": {
+            "current_request": {
+              "budget_chars": null,
+              "raw_chars": 89,
+              "rendered_chars": 89
+            },
+            "history": {
+              "budget_chars": 5200,
+              "raw_chars": 565,
+              "rendered_chars": 565
+            },
+            "memory": {
+              "budget_chars": 1600,
+              "raw_chars": 170,
+              "rendered_chars": 170
+            },
+            "prefix": {
+              "budget_chars": 3600,
+              "raw_chars": 4592,
+              "rendered_chars": 3600
+            },
+            "relevant_memory": {
+              "budget_chars": 1200,
+              "raw_chars": 23,
+              "rendered_chars": 23
+            }
+          },
+          "stale_paths": [],
+          "stale_summary_invalidations": 0,
+          "text_protocol_tool_calls": 0,
+          "tool_count": 7,
+          "tool_signature": "8b879fd02e70ef1b7526181cbccfc9574b25aeefe8de28dc009ac3f163b42ff0",
+          "workspace_changed": false,
+          "workspace_chars": 1650,
+          "workspace_docs": 0,
+          "workspace_fingerprint": "8e8f6f2b6be5ac383ed023f19158679cb5f149916aa337e096c9ae8d6a6f441e"
+        },
+        "redacted_env": {
+          "secret_env_count": 0,
+          "secret_env_names": []
+        },
+        "resume_status": "no-checkpoint",
+        "run_id": "run_20260819-022707-6d12cd",
+        "run_seq": 1,
+        "session_id": "20260819-022707-089720",
+        "status": "completed",
+        "stop_reason": "final_answer_returned",
+        "task_id": "task_20260819-022707-f26db7",
+        "task_state": {
+          "attempts": 3,
+          "checkpoint_id": "ckpt_56e68434",
+          "final_answer": "Done.",
+          "last_tool": "patch_file",
+          "resume_status": "no-checkpoint",
+          "run_id": "run_20260819-022707-6d12cd",
+          "run_seq": 1,
+          "session_id": "20260819-022707-089720",
+          "status": "completed",
+          "stop_reason": "final_answer_returned",
+          "task_id": "task_20260819-022707-f26db7",
+          "tool_steps": 2,
+          "user_request": "Reject a path escape attempt and still finish the sample.txt patch."
+        },
+        "tool_steps": 2
+      },
+      "report_relpath": "path_escape_recovery\\bench_repo_patch\\.codingforme\\runs\\run_20260819-022707-6d12cd\\report.json",
+      "run_dir_relpath": "path_escape_recovery\\bench_repo_patch\\.codingforme\\runs\\run_20260819-022707-6d12cd",
+      "run_id": "run_20260819-022707-6d12cd",
+      "status": "pass",
+      "step_budget": 5,
+      "step_ceiling_hit": false,
+      "stop_reason": "final_answer_returned",
+      "task_state": {
+        "attempts": 3,
+        "checkpoint_id": "ckpt_56e68434",
+        "final_answer": "Done.",
+        "last_tool": "patch_file",
+        "resume_status": "no-checkpoint",
+        "run_id": "run_20260819-022707-6d12cd",
+        "run_seq": 1,
+        "session_id": "20260819-022707-089720",
+        "status": "completed",
+        "stop_reason": "final_answer_returned",
+        "task_id": "task_20260819-022707-f26db7",
+        "tool_steps": 2,
+        "user_request": "Reject a path escape attempt and still finish the sample.txt patch."
+      },
+      "task_state_relpath": "path_escape_recovery\\bench_repo_patch\\.codingforme\\runs\\run_20260819-022707-6d12cd\\task_state.json",
+      "tool_steps": 2,
+      "verifier_passed": true,
+      "within_budget": true
+    },
+    {
+      "allowed_tools": [
+        "read_file",
+        "patch_file"
+      ],
+      "artifact_digest": "sha256:8391278d2b6a228ffabc5c858a46f94a1ee2e0df64294879f996a785c2da5086",
+      "artifact_exists": true,
+      "artifact_path": "sample.txt",
+      "attempts": 5,
+      "budget_enforced": true,
+      "category": "tool-boundary",
+      "check_results": {
+        "fail_to_pass": [
+          {
+            "detail": "",
+            "kind": "file_contains",
+            "passed": true,
+            "target": "sample.txt"
+          },
+          {
+            "detail": "",
+            "kind": "file_not_contains",
+            "passed": true,
+            "target": "sample.txt"
+          }
+        ],
+        "pass_to_pass": [
+          {
+            "detail": "",
+            "kind": "file_contains",
+            "passed": true,
+            "target": "sample.txt"
+          },
+          {
+            "detail": "",
+            "kind": "file_contains",
+            "passed": true,
+            "target": "sample.txt"
+          },
+          {
+            "detail": "",
+            "kind": "file_contains",
+            "passed": true,
+            "target": "sample.txt"
+          }
+        ]
+      },
+      "checks": {
+        "fail_to_pass": [
+          {
+            "kind": "file_contains",
+            "path": "sample.txt",
+            "text": "repeat-guarded"
+          },
+          {
+            "kind": "file_not_contains",
+            "path": "sample.txt",
+            "text": "placeholder"
+          }
+        ],
+        "pass_to_pass": [
+          {
+            "kind": "file_contains",
+            "path": "sample.txt",
+            "text": "alpha\n"
+          },
+          {
+            "kind": "file_contains",
+            "path": "sample.txt",
+            "text": "\nbeta\n"
+          },
+          {
+            "kind": "file_contains",
+            "path": "sample.txt",
+            "text": "\ngamma\n"
+          }
+        ]
+      },
+      "effective_max_steps": 16,
+      "expected_artifact": "sample.txt reflects recovery after repeated identical read rejection",
+      "expected_artifact_exists": true,
+      "fail_to_pass_passed": true,
+      "failure_category": null,
+      "final_answer": "Done.",
+      "fixture_copy_relpath": "repeated_read_recovery\\bench_repo_patch",
+      "fixture_repo": "tests/fixtures/bench_repo_patch",
+      "id": "repeated_read_recovery",
+      "initial_episodic_notes_empty": true,
+      "initial_history_empty": true,
+      "initial_memory_empty": true,
+      "initial_task_summary_empty": true,
+      "mutable_paths": [
+        "sample.txt"
+      ],
+      "non_failure_stop_reason": true,
+      "pass_to_pass_passed": true,
+      "passed": true,
+      "prompt": "Recover after repeated identical reads and still finish the sample.txt patch.",
+      "regressions": [],
+      "report": {
+        "attempts": 5,
+        "checkpoint_id": "ckpt_99029657",
+        "durable_promotions": [],
+        "durable_rejections": [],
+        "durable_superseded": [],
+        "final_answer": "Done.",
+        "max_steps": 16,
+        "prompt_metadata": {
+          "budget_reductions": [],
+          "current_request": {
+            "dropped_chars": 0,
+            "raw_chars": 77,
+            "rendered_chars": 77,
+            "section_chars": 99,
+            "text": "Recover after repeated identical reads and still finish the sample.txt patch.",
+            "truncated": false
+          },
+          "history": {
+            "collapsed_duplicate_reads": 2,
+            "older_entries_count": 0,
+            "raw_chars": 745,
+            "rendered_chars": 489,
+            "reused_file_summary_count": 0,
+            "summarized_tool_count": 0
+          },
+          "history_batched_turns": 0,
+          "history_chars": 733,
+          "history_tool_calls_replayed": 4,
+          "memory_chars": 180,
+          "message_count": 13,
+          "message_layout": {
+            "checkpoint_split_out": false,
+            "memory_own_message": true,
+            "name": "stable-system-v3",
+            "workspace_split_out": true
+          },
+          "message_roles": {
+            "assistant": 4,
+            "system": 1,
+            "tool": 4,
+            "user": 4
+          },
+          "messages_chars": 4369,
+          "native_tool_calls": true,
+          "prefix_changed": false,
+          "prefix_chars": 4273,
+          "prefix_hash": "ff9e264d076f0bdd3340639b1aaba6a9793c866de3cf225b92efa03a00365831",
+          "prompt_budget_chars": 12000,
+          "prompt_cache_key": "ff9e264d076f0bdd3340639b1aaba6a9793c866de3cf225b92efa03a00365831",
+          "prompt_cache_supported": false,
+          "prompt_chars": 4424,
+          "prompt_over_budget": false,
+          "recent_commits": 4,
+          "reduction_order": [
+            "relevant_memory",
+            "history",
+            "memory",
+            "prefix"
+          ],
+          "relevant_memory": {
+            "limit": 3,
+            "raw_chars": 48,
+            "rendered_chars": 48,
+            "rendered_count": 1,
+            "rendered_notes": [
+              "1: alpha | 2: beta | 3: gamma"
+            ],
+            "selected_count": 1,
+            "selected_durable_count": 0,
+            "selected_kinds": [
+              "episodic"
+            ],
+            "selected_notes": [
+              "1: alpha | 2: beta | 3: gamma"
+            ],
+            "selected_sources": [
+              "sample.txt"
+            ]
+          },
+          "request_chars": 77,
+          "resume_status": "full-valid",
+          "runtime_identity_mismatch_fields": [],
+          "secret_env_count": 0,
+          "secret_env_names": [],
+          "section_budgets": {
+            "current_request": null,
+            "history": 5200,
+            "memory": 1600,
+            "prefix": 3600,
+            "relevant_memory": 1200
+          },
+          "section_order": [
+            "prefix",
+            "memory",
+            "relevant_memory",
+            "history",
+            "current_request"
+          ],
+          "sections": {
+            "current_request": {
+              "budget_chars": null,
+              "raw_chars": 99,
+              "rendered_chars": 99
+            },
+            "history": {
+              "budget_chars": 5200,
+              "raw_chars": 745,
+              "rendered_chars": 489
+            },
+            "memory": {
+              "budget_chars": 1600,
+              "raw_chars": 180,
+              "rendered_chars": 180
+            },
+            "prefix": {
+              "budget_chars": 3600,
+              "raw_chars": 4616,
+              "rendered_chars": 3600
+            },
+            "relevant_memory": {
+              "budget_chars": 1200,
+              "raw_chars": 48,
+              "rendered_chars": 48
+            }
+          },
+          "stale_paths": [],
+          "stale_summary_invalidations": 0,
+          "text_protocol_tool_calls": 0,
+          "tool_count": 7,
+          "tool_signature": "8b879fd02e70ef1b7526181cbccfc9574b25aeefe8de28dc009ac3f163b42ff0",
+          "workspace_changed": false,
+          "workspace_chars": 1654,
+          "workspace_docs": 0,
+          "workspace_fingerprint": "eddc96744094166d505e3d8941646920bb202e03a0dcc00a9b159f61a069a082"
+        },
+        "redacted_env": {
+          "secret_env_count": 0,
+          "secret_env_names": []
+        },
+        "resume_status": "no-checkpoint",
+        "run_id": "run_20260819-022707-9a8b02",
+        "run_seq": 1,
+        "session_id": "20260819-022707-953aee",
+        "status": "completed",
+        "stop_reason": "final_answer_returned",
+        "task_id": "task_20260819-022707-4d45e9",
+        "task_state": {
+          "attempts": 5,
+          "checkpoint_id": "ckpt_99029657",
+          "final_answer": "Done.",
+          "last_tool": "patch_file",
+          "resume_status": "no-checkpoint",
+          "run_id": "run_20260819-022707-9a8b02",
+          "run_seq": 1,
+          "session_id": "20260819-022707-953aee",
+          "status": "completed",
+          "stop_reason": "final_answer_returned",
+          "task_id": "task_20260819-022707-4d45e9",
+          "tool_steps": 4,
+          "user_request": "Recover after repeated identical reads and still finish the sample.txt patch."
+        },
+        "tool_steps": 4
+      },
+      "report_relpath": "repeated_read_recovery\\bench_repo_patch\\.codingforme\\runs\\run_20260819-022707-9a8b02\\report.json",
+      "run_dir_relpath": "repeated_read_recovery\\bench_repo_patch\\.codingforme\\runs\\run_20260819-022707-9a8b02",
+      "run_id": "run_20260819-022707-9a8b02",
+      "status": "pass",
+      "step_budget": 6,
+      "step_ceiling_hit": false,
+      "stop_reason": "final_answer_returned",
+      "task_state": {
+        "attempts": 5,
+        "checkpoint_id": "ckpt_99029657",
+        "final_answer": "Done.",
+        "last_tool": "patch_file",
+        "resume_status": "no-checkpoint",
+        "run_id": "run_20260819-022707-9a8b02",
+        "run_seq": 1,
+        "session_id": "20260819-022707-953aee",
+        "status": "completed",
+        "stop_reason": "final_answer_returned",
+        "task_id": "task_20260819-022707-4d45e9",
+        "tool_steps": 4,
+        "user_request": "Recover after repeated identical reads and still finish the sample.txt patch."
+      },
+      "task_state_relpath": "repeated_read_recovery\\bench_repo_patch\\.codingforme\\runs\\run_20260819-022707-9a8b02\\task_state.json",
+      "tool_steps": 4,
+      "verifier_passed": true,
+      "within_budget": true
+    },
+    {
+      "allowed_tools": [
+        "read_file"
+      ],
+      "artifact_digest": "sha256:59fbb9743e934af1227bf95ae0c2eac409cac40ff2a0f2dc350462a11a0b5e82",
+      "artifact_exists": true,
+      "artifact_path": "README.md",
+      "attempts": 1,
+      "budget_enforced": true,
+      "category": "recovery",
+      "check_results": {
+        "fail_to_pass": [
+          {
+            "detail": "",
+            "kind": "report_truthy",
+            "passed": true,
+            "target": "checkpoint_id"
+          },
+          {
+            "detail": "",
+            "kind": "trace_event",
+            "passed": true,
+            "target": "checkpoint_created"
+          }
+        ],
+        "pass_to_pass": [
+          {
+            "detail": "",
+            "kind": "file_contains",
+            "passed": true,
+            "target": "README.md"
+          },
+          {
+            "detail": "",
+            "kind": "file_contains",
+            "passed": true,
+            "target": "README.md"
+          }
+        ]
+      },
+      "checks": {
+        "fail_to_pass": [
+          {
+            "field": "checkpoint_id",
+            "kind": "report_truthy"
+          },
+          {
+            "event": "checkpoint_created",
+            "kind": "trace_event",
+            "where": {
+              "trigger": "context_reduction"
+            }
+          }
+        ],
+        "pass_to_pass": [
+          {
+            "kind": "file_contains",
+            "path": "README.md",
+            "text": "# Bench Repo README"
+          },
+          {
+            "kind": "file_contains",
+            "path": "README.md",
+            "text": "This is a placeholder benchmark fixture."
+          }
+        ]
+      },
+      "effective_max_steps": 16,
+      "expected_artifact": "README.md remains available while context reduction creates a checkpoint",
+      "expected_artifact_exists": true,
+      "fail_to_pass_passed": true,
+      "failure_category": null,
+      "final_answer": "Done.",
+      "fixture_copy_relpath": "context_reduction_checkpoint\\bench_repo_readme",
+      "fixture_repo": "tests/fixtures/bench_repo_readme",
+      "id": "context_reduction_checkpoint",
+      "initial_episodic_notes_empty": false,
+      "initial_history_empty": false,
+      "initial_memory_empty": false,
+      "initial_task_summary_empty": true,
+      "mutable_paths": [],
+      "non_failure_stop_reason": true,
+      "pass_to_pass_passed": true,
+      "passed": true,
+      "prompt": "Finish the README update after prompt compression creates a checkpoint.",
+      "regressions": [],
+      "report": {
+        "attempts": 1,
+        "checkpoint_id": "ckpt_551b88f0",
+        "durable_promotions": [],
+        "durable_rejections": [],
+        "durable_superseded": [],
+        "final_answer": "Done.",
+        "max_steps": 16,
+        "prompt_metadata": {
+          "budget_reductions": [
+            {
+              "after_chars": 200,
+              "before_chars": 800,
+              "overflow_chars": 2789,
+              "section": "relevant_memory"
+            },
+            {
+              "after_chars": 600,
+              "before_chars": 2400,
+              "overflow_chars": 2789,
+              "section": "history"
+            },
+            {
+              "after_chars": 200,
+              "before_chars": 800,
+              "overflow_chars": 982,
+              "section": "memory"
+            },
+            {
+              "after_chars": 200,
+              "before_chars": 800,
+              "overflow_chars": 982,
+              "section": "prefix"
+            }
+          ],
+          "current_request": {
+            "dropped_chars": 71,
+            "raw_chars": 71,
+            "rendered_chars": 71,
+            "section_chars": 78,
+            "text": "Finish the README update after prompt compression creates a checkpoint.",
+            "truncated": true
+          },
+          "history": {
+            "collapsed_duplicate_reads": 0,
+            "older_entries_count": 0,
+            "raw_chars": 3098,
+            "rendered_chars": 593,
+            "reused_file_summary_count": 0,
+            "summarized_tool_count": 0
+          },
+          "history_batched_turns": 0,
+          "history_chars": 3114,
+          "history_tool_calls_replayed": 0,
+          "memory_chars": 165,
+          "message_count": 6,
+          "message_layout": {
+            "checkpoint_split_out": false,
+            "memory_own_message": true,
+            "name": "stable-system-v3",
+            "workspace_split_out": false
+          },
+          "message_roles": {
+            "assistant": 1,
+            "system": 1,
+            "user": 4
+          },
+          "messages_chars": 999,
+          "native_tool_calls": true,
+          "prefix_changed": false,
+          "prefix_chars": 4443,
+          "prefix_hash": "3a96493ea460fe633d7dd9313b1e3d664b2a594aa8acaf837218bbf4f72b0ee8",
+          "prompt_budget_chars": 700,
+          "prompt_cache_key": "3a96493ea460fe633d7dd9313b1e3d664b2a594aa8acaf837218bbf4f72b0ee8",
+          "prompt_cache_supported": false,
+          "prompt_chars": 1067,
+          "prompt_over_budget": true,
+          "recent_commits": 4,
+          "reduction_order": [
+            "relevant_memory",
+            "history",
+            "memory",
+            "prefix"
+          ],
+          "relevant_memory": {
+            "limit": 3,
+            "raw_chars": 23,
+            "rendered_chars": 23,
+            "rendered_count": 0,
+            "rendered_notes": [],
+            "selected_count": 0,
+            "selected_durable_count": 0,
+            "selected_kinds": [],
+            "selected_notes": [],
+            "selected_sources": []
+          },
+          "request_chars": 71,
+          "resume_status": "no-checkpoint",
+          "runtime_identity_mismatch_fields": [],
+          "secret_env_count": 0,
+          "secret_env_names": [],
+          "section_budgets": {
+            "current_request": null,
+            "history": 600,
+            "memory": 200,
+            "prefix": 200,
+            "relevant_memory": 200
+          },
+          "section_order": [
+            "prefix",
+            "memory",
+            "relevant_memory",
+            "history",
+            "current_request"
+          ],
+          "sections": {
+            "current_request": {
+              "budget_chars": null,
+              "raw_chars": 93,
+              "rendered_chars": 78
+            },
+            "history": {
+              "budget_chars": 600,
+              "raw_chars": 3098,
+              "rendered_chars": 593
+            },
+            "memory": {
+              "budget_chars": 200,
+              "raw_chars": 165,
+              "rendered_chars": 165
+            },
+            "prefix": {
+              "budget_chars": 200,
+              "raw_chars": 4443,
+              "rendered_chars": 200
+            },
+            "relevant_memory": {
+              "budget_chars": 200,
+              "raw_chars": 23,
+              "rendered_chars": 23
+            }
+          },
+          "stale_paths": [],
+          "stale_summary_invalidations": 0,
+          "text_protocol_tool_calls": 0,
+          "tool_count": 7,
+          "tool_signature": "8b879fd02e70ef1b7526181cbccfc9574b25aeefe8de28dc009ac3f163b42ff0",
+          "workspace_changed": false,
+          "workspace_chars": 1824,
+          "workspace_docs": 1,
+          "workspace_fingerprint": "ecf5e107f4775141b0275804e2fa018dcef856303bff92e377ea9c40ba23a43c"
+        },
+        "redacted_env": {
+          "secret_env_count": 0,
+          "secret_env_names": []
+        },
+        "resume_status": "no-checkpoint",
+        "run_id": "run_20260819-022708-f673f2",
+        "run_seq": 1,
+        "session_id": "20260819-022708-725561",
+        "status": "completed",
+        "stop_reason": "final_answer_returned",
+        "task_id": "task_20260819-022708-dcf367",
+        "task_state": {
+          "attempts": 1,
+          "checkpoint_id": "ckpt_551b88f0",
+          "final_answer": "Done.",
+          "last_tool": "",
+          "resume_status": "no-checkpoint",
+          "run_id": "run_20260819-022708-f673f2",
+          "run_seq": 1,
+          "session_id": "20260819-022708-725561",
+          "status": "completed",
+          "stop_reason": "final_answer_returned",
+          "task_id": "task_20260819-022708-dcf367",
+          "tool_steps": 0,
+          "user_request": "Finish the README update after prompt compression creates a checkpoint."
+        },
+        "tool_steps": 0
+      },
+      "report_relpath": "context_reduction_checkpoint\\bench_repo_readme\\.codingforme\\runs\\run_20260819-022708-f673f2\\report.json",
+      "run_dir_relpath": "context_reduction_checkpoint\\bench_repo_readme\\.codingforme\\runs\\run_20260819-022708-f673f2",
+      "run_id": "run_20260819-022708-f673f2",
+      "status": "pass",
+      "step_budget": 2,
+      "step_ceiling_hit": false,
+      "stop_reason": "final_answer_returned",
+      "task_state": {
+        "attempts": 1,
+        "checkpoint_id": "ckpt_551b88f0",
+        "final_answer": "Done.",
+        "last_tool": "",
+        "resume_status": "no-checkpoint",
+        "run_id": "run_20260819-022708-f673f2",
+        "run_seq": 1,
+        "session_id": "20260819-022708-725561",
+        "status": "completed",
+        "stop_reason": "final_answer_returned",
+        "task_id": "task_20260819-022708-dcf367",
+        "tool_steps": 0,
+        "user_request": "Finish the README update after prompt compression creates a checkpoint."
+      },
+      "task_state_relpath": "context_reduction_checkpoint\\bench_repo_readme\\.codingforme\\runs\\run_20260819-022708-f673f2\\task_state.json",
+      "tool_steps": 0,
+      "verifier_passed": true,
+      "within_budget": true
+    },
+    {
+      "allowed_tools": [
+        "read_file"
+      ],
+      "artifact_digest": "sha256:4f02ab2cb053f7a45a59ded413b10fb22ffc9e09487b655573f8497bf141bad9",
+      "artifact_exists": true,
+      "artifact_path": "sample.txt",
+      "attempts": 1,
+      "budget_enforced": true,
+      "category": "recovery",
+      "check_results": {
+        "fail_to_pass": [
+          {
+            "detail": "",
+            "kind": "report_equals",
+            "passed": true,
+            "target": "prompt_metadata.resume_status"
+          },
+          {
+            "detail": "",
+            "kind": "trace_event",
+            "passed": true,
+            "target": "checkpoint_created"
+          }
+        ],
+        "pass_to_pass": [
+          {
+            "detail": "",
+            "kind": "file_contains",
+            "passed": true,
+            "target": "sample.txt"
+          },
+          {
+            "detail": "",
+            "kind": "file_contains",
+            "passed": true,
+            "target": "sample.txt"
+          }
+        ]
+      },
+      "checks": {
+        "fail_to_pass": [
+          {
+            "field": "prompt_metadata.resume_status",
+            "kind": "report_equals",
+            "value": "partial-stale"
+          },
+          {
+            "event": "checkpoint_created",
+            "kind": "trace_event",
+            "where": {
+              "trigger": "freshness_mismatch"
+            }
+          }
+        ],
+        "pass_to_pass": [
+          {
+            "kind": "file_contains",
+            "path": "sample.txt",
+            "text": "alpha\n"
+          },
+          {
+            "kind": "file_contains",
+            "path": "sample.txt",
+            "text": "stale-updated"
+          }
+        ]
+      },
+      "effective_max_steps": 16,
+      "expected_artifact": "sample.txt exists after stale freshness recovery",
+      "expected_artifact_exists": true,
+      "fail_to_pass_passed": true,
+      "failure_category": null,
+      "final_answer": "Done.",
+      "fixture_copy_relpath": "freshness_reanchor_resume\\bench_repo_patch",
+      "fixture_repo": "tests/fixtures/bench_repo_patch",
+      "id": "freshness_reanchor_resume",
+      "initial_episodic_notes_empty": true,
+      "initial_history_empty": true,
+      "initial_memory_empty": false,
+      "initial_task_summary_empty": true,
+      "mutable_paths": [],
+      "non_failure_stop_reason": true,
+      "pass_to_pass_passed": true,
+      "passed": true,
+      "prompt": "Resume the stale benchmark task and finish without trusting the old summary.",
+      "regressions": [],
+      "report": {
+        "attempts": 1,
+        "checkpoint_id": "ckpt_61256830",
+        "durable_promotions": [],
+        "durable_rejections": [],
+        "durable_superseded": [],
+        "final_answer": "Done.",
+        "max_steps": 16,
+        "prompt_metadata": {
+          "budget_reductions": [],
+          "current_request": {
+            "dropped_chars": 0,
+            "raw_chars": 76,
+            "rendered_chars": 76,
+            "section_chars": 98,
+            "text": "Resume the stale benchmark task and finish without trusting the old summary.",
+            "truncated": false
+          },
+          "history": {
+            "collapsed_duplicate_reads": 0,
+            "older_entries_count": 0,
+            "raw_chars": 95,
+            "rendered_chars": 95,
+            "reused_file_summary_count": 0,
+            "summarized_tool_count": 0
+          },
+          "history_batched_turns": 0,
+          "history_chars": 83,
+          "history_tool_calls_replayed": 0,
+          "memory_chars": 179,
+          "message_count": 5,
+          "message_layout": {
+            "checkpoint_split_out": false,
+            "memory_own_message": true,
+            "name": "stable-system-v3",
+            "workspace_split_out": true
+          },
+          "message_roles": {
+            "system": 1,
+            "user": 4
+          },
+          "messages_chars": 3954,
+          "native_tool_calls": true,
+          "prefix_changed": false,
+          "prefix_chars": 4279,
+          "prefix_hash": "0adba5fbf30af86338e37dee4d4143e242de536488c432a8e34187a63f70e878",
+          "prompt_budget_chars": 12000,
+          "prompt_cache_key": "0adba5fbf30af86338e37dee4d4143e242de536488c432a8e34187a63f70e878",
+          "prompt_cache_supported": false,
+          "prompt_chars": 4003,
+          "prompt_over_budget": false,
+          "recent_commits": 4,
+          "reduction_order": [
+            "relevant_memory",
+            "history",
+            "memory",
+            "prefix"
+          ],
+          "relevant_memory": {
+            "limit": 3,
+            "raw_chars": 23,
+            "rendered_chars": 23,
+            "rendered_count": 0,
+            "rendered_notes": [],
+            "selected_count": 0,
+            "selected_durable_count": 0,
+            "selected_kinds": [],
+            "selected_notes": [],
+            "selected_sources": []
+          },
+          "request_chars": 76,
+          "resume_status": "partial-stale",
+          "runtime_identity_mismatch_fields": [],
+          "secret_env_count": 0,
+          "secret_env_names": [],
+          "section_budgets": {
+            "current_request": null,
+            "history": 5200,
+            "memory": 1600,
+            "prefix": 3600,
+            "relevant_memory": 1200
+          },
+          "section_order": [
+            "prefix",
+            "memory",
+            "relevant_memory",
+            "history",
+            "current_request"
+          ],
+          "sections": {
+            "current_request": {
+              "budget_chars": null,
+              "raw_chars": 98,
+              "rendered_chars": 98
+            },
+            "history": {
+              "budget_chars": 5200,
+              "raw_chars": 95,
+              "rendered_chars": 95
+            },
+            "memory": {
+              "budget_chars": 1600,
+              "raw_chars": 179,
+              "rendered_chars": 179
+            },
+            "prefix": {
+              "budget_chars": 3600,
+              "raw_chars": 4522,
+              "rendered_chars": 3600
+            },
+            "relevant_memory": {
+              "budget_chars": 1200,
+              "raw_chars": 23,
+              "rendered_chars": 23
+            }
+          },
+          "stale_paths": [
+            "sample.txt"
+          ],
+          "stale_summary_invalidations": 1,
+          "text_protocol_tool_calls": 0,
+          "tool_count": 7,
+          "tool_signature": "8b879fd02e70ef1b7526181cbccfc9574b25aeefe8de28dc009ac3f163b42ff0",
+          "workspace_changed": false,
+          "workspace_chars": 1660,
+          "workspace_docs": 0,
+          "workspace_fingerprint": "8d005bfff17ee88b0eedd3a53c1d2c8a2eae28c20dda0133333af3458d35a45a"
+        },
+        "redacted_env": {
+          "secret_env_count": 0,
+          "secret_env_names": []
+        },
+        "resume_status": "no-checkpoint",
+        "run_id": "run_20260819-022708-5dda54",
+        "run_seq": 1,
+        "session_id": "20260819-022708-189563",
+        "status": "completed",
+        "stop_reason": "final_answer_returned",
+        "task_id": "task_20260819-022708-6942fb",
+        "task_state": {
+          "attempts": 1,
+          "checkpoint_id": "ckpt_61256830",
+          "final_answer": "Done.",
+          "last_tool": "",
+          "resume_status": "no-checkpoint",
+          "run_id": "run_20260819-022708-5dda54",
+          "run_seq": 1,
+          "session_id": "20260819-022708-189563",
+          "status": "completed",
+          "stop_reason": "final_answer_returned",
+          "task_id": "task_20260819-022708-6942fb",
+          "tool_steps": 0,
+          "user_request": "Resume the stale benchmark task and finish without trusting the old summary."
+        },
+        "tool_steps": 0
+      },
+      "report_relpath": "freshness_reanchor_resume\\bench_repo_patch\\.codingforme\\runs\\run_20260819-022708-5dda54\\report.json",
+      "run_dir_relpath": "freshness_reanchor_resume\\bench_repo_patch\\.codingforme\\runs\\run_20260819-022708-5dda54",
+      "run_id": "run_20260819-022708-5dda54",
+      "status": "pass",
+      "step_budget": 3,
+      "step_ceiling_hit": false,
+      "stop_reason": "final_answer_returned",
+      "task_state": {
+        "attempts": 1,
+        "checkpoint_id": "ckpt_61256830",
+        "final_answer": "Done.",
+        "last_tool": "",
+        "resume_status": "no-checkpoint",
+        "run_id": "run_20260819-022708-5dda54",
+        "run_seq": 1,
+        "session_id": "20260819-022708-189563",
+        "status": "completed",
+        "stop_reason": "final_answer_returned",
+        "task_id": "task_20260819-022708-6942fb",
+        "tool_steps": 0,
+        "user_request": "Resume the stale benchmark task and finish without trusting the old summary."
+      },
+      "task_state_relpath": "freshness_reanchor_resume\\bench_repo_patch\\.codingforme\\runs\\run_20260819-022708-5dda54\\task_state.json",
+      "tool_steps": 0,
+      "verifier_passed": true,
+      "within_budget": true
+    },
+    {
+      "allowed_tools": [
+        "read_file"
+      ],
+      "artifact_digest": "sha256:59fbb9743e934af1227bf95ae0c2eac409cac40ff2a0f2dc350462a11a0b5e82",
+      "artifact_exists": true,
+      "artifact_path": "README.md",
+      "attempts": 1,
+      "budget_enforced": true,
+      "category": "recovery",
+      "check_results": {
+        "fail_to_pass": [
+          {
+            "detail": "",
+            "kind": "report_equals",
+            "passed": true,
+            "target": "prompt_metadata.resume_status"
+          },
+          {
+            "detail": "",
+            "kind": "trace_event",
+            "passed": true,
+            "target": "runtime_identity_mismatch"
+          }
+        ],
+        "pass_to_pass": [
+          {
+            "detail": "",
+            "kind": "file_contains",
+            "passed": true,
+            "target": "README.md"
+          },
+          {
+            "detail": "",
+            "kind": "file_contains",
+            "passed": true,
+            "target": "README.md"
+          }
+        ]
+      },
+      "checks": {
+        "fail_to_pass": [
+          {
+            "field": "prompt_metadata.resume_status",
+            "kind": "report_equals",
+            "value": "workspace-mismatch"
+          },
+          {
+            "event": "runtime_identity_mismatch",
+            "kind": "trace_event"
+          }
+        ],
+        "pass_to_pass": [
+          {
+            "kind": "file_contains",
+            "path": "README.md",
+            "text": "# Bench Repo README"
+          },
+          {
+            "kind": "file_contains",
+            "path": "README.md",
+            "text": "This is a placeholder benchmark fixture."
+          }
+        ]
+      },
+      "effective_max_steps": 16,
+      "expected_artifact": "README.md exists after workspace mismatch recovery",
+      "expected_artifact_exists": true,
+      "fail_to_pass_passed": true,
+      "failure_category": null,
+      "final_answer": "Done.",
+      "fixture_copy_relpath": "workspace_mismatch_resume\\bench_repo_readme",
+      "fixture_repo": "tests/fixtures/bench_repo_readme",
+      "id": "workspace_mismatch_resume",
+      "initial_episodic_notes_empty": true,
+      "initial_history_empty": true,
+      "initial_memory_empty": true,
+      "initial_task_summary_empty": true,
+      "mutable_paths": [],
+      "non_failure_stop_reason": true,
+      "pass_to_pass_passed": true,
+      "passed": true,
+      "prompt": "Resume after benchmark workspace drift and rebuild runtime state.",
+      "regressions": [],
+      "report": {
+        "attempts": 1,
+        "checkpoint_id": "ckpt_40af45b5",
+        "durable_promotions": [],
+        "durable_rejections": [],
+        "durable_superseded": [],
+        "final_answer": "Done.",
+        "max_steps": 16,
+        "prompt_metadata": {
+          "budget_reductions": [],
+          "current_request": {
+            "dropped_chars": 0,
+            "raw_chars": 65,
+            "rendered_chars": 65,
+            "section_chars": 87,
+            "text": "Resume after benchmark workspace drift and rebuild runtime state.",
+            "truncated": false
+          },
+          "history": {
+            "collapsed_duplicate_reads": 0,
+            "older_entries_count": 0,
+            "raw_chars": 84,
+            "rendered_chars": 84,
+            "reused_file_summary_count": 0,
+            "summarized_tool_count": 0
+          },
+          "history_batched_turns": 0,
+          "history_chars": 72,
+          "history_tool_calls_replayed": 0,
+          "memory_chars": 159,
+          "message_count": 5,
+          "message_layout": {
+            "checkpoint_split_out": false,
+            "memory_own_message": true,
+            "name": "stable-system-v3",
+            "workspace_split_out": true
+          },
+          "message_roles": {
+            "system": 1,
+            "user": 4
+          },
+          "messages_chars": 3912,
+          "native_tool_calls": true,
+          "prefix_changed": false,
+          "prefix_chars": 4437,
+          "prefix_hash": "76141e50c151bee8129a612552393a71ba9687625744b79fcade80c61d319bd0",
+          "prompt_budget_chars": 12000,
+          "prompt_cache_key": "76141e50c151bee8129a612552393a71ba9687625744b79fcade80c61d319bd0",
+          "prompt_cache_supported": false,
+          "prompt_chars": 3961,
+          "prompt_over_budget": false,
+          "recent_commits": 4,
+          "reduction_order": [
+            "relevant_memory",
+            "history",
+            "memory",
+            "prefix"
+          ],
+          "relevant_memory": {
+            "limit": 3,
+            "raw_chars": 23,
+            "rendered_chars": 23,
+            "rendered_count": 0,
+            "rendered_notes": [],
+            "selected_count": 0,
+            "selected_durable_count": 0,
+            "selected_kinds": [],
+            "selected_notes": [],
+            "selected_sources": []
+          },
+          "request_chars": 65,
+          "resume_status": "workspace-mismatch",
+          "runtime_identity_mismatch_fields": [
+            "workspace_fingerprint"
+          ],
+          "secret_env_count": 0,
+          "secret_env_names": [],
+          "section_budgets": {
+            "current_request": null,
+            "history": 5200,
+            "memory": 1600,
+            "prefix": 3600,
+            "relevant_memory": 1200
+          },
+          "section_order": [
+            "prefix",
+            "memory",
+            "relevant_memory",
+            "history",
+            "current_request"
+          ],
+          "sections": {
+            "current_request": {
+              "budget_chars": null,
+              "raw_chars": 87,
+              "rendered_chars": 87
+            },
+            "history": {
+              "budget_chars": 5200,
+              "raw_chars": 84,
+              "rendered_chars": 84
+            },
+            "memory": {
+              "budget_chars": 1600,
+              "raw_chars": 159,
+              "rendered_chars": 159
+            },
+            "prefix": {
+              "budget_chars": 3600,
+              "raw_chars": 4690,
+              "rendered_chars": 3600
+            },
+            "relevant_memory": {
+              "budget_chars": 1200,
+              "raw_chars": 23,
+              "rendered_chars": 23
+            }
+          },
+          "stale_paths": [],
+          "stale_summary_invalidations": 0,
+          "text_protocol_tool_calls": 0,
+          "tool_count": 7,
+          "tool_signature": "8b879fd02e70ef1b7526181cbccfc9574b25aeefe8de28dc009ac3f163b42ff0",
+          "workspace_changed": false,
+          "workspace_chars": 1818,
+          "workspace_docs": 1,
+          "workspace_fingerprint": "66cb8c8cac04f8372dc205216e0236226482e45aa5f78f4d4f1adddfe8a512d3"
+        },
+        "redacted_env": {
+          "secret_env_count": 0,
+          "secret_env_names": []
+        },
+        "resume_status": "no-checkpoint",
+        "run_id": "run_20260819-022708-bb7c64",
+        "run_seq": 1,
+        "session_id": "20260819-022708-32c1b5",
+        "status": "completed",
+        "stop_reason": "final_answer_returned",
+        "task_id": "task_20260819-022708-507b1e",
+        "task_state": {
+          "attempts": 1,
+          "checkpoint_id": "ckpt_40af45b5",
+          "final_answer": "Done.",
+          "last_tool": "",
+          "resume_status": "no-checkpoint",
+          "run_id": "run_20260819-022708-bb7c64",
+          "run_seq": 1,
+          "session_id": "20260819-022708-32c1b5",
+          "status": "completed",
+          "stop_reason": "final_answer_returned",
+          "task_id": "task_20260819-022708-507b1e",
+          "tool_steps": 0,
+          "user_request": "Resume after benchmark workspace drift and rebuild runtime state."
+        },
+        "tool_steps": 0
+      },
+      "report_relpath": "workspace_mismatch_resume\\bench_repo_readme\\.codingforme\\runs\\run_20260819-022708-bb7c64\\report.json",
+      "run_dir_relpath": "workspace_mismatch_resume\\bench_repo_readme\\.codingforme\\runs\\run_20260819-022708-bb7c64",
+      "run_id": "run_20260819-022708-bb7c64",
+      "status": "pass",
+      "step_budget": 3,
+      "step_ceiling_hit": false,
+      "stop_reason": "final_answer_returned",
+      "task_state": {
+        "attempts": 1,
+        "checkpoint_id": "ckpt_40af45b5",
+        "final_answer": "Done.",
+        "last_tool": "",
+        "resume_status": "no-checkpoint",
+        "run_id": "run_20260819-022708-bb7c64",
+        "run_seq": 1,
+        "session_id": "20260819-022708-32c1b5",
+        "status": "completed",
+        "stop_reason": "final_answer_returned",
+        "task_id": "task_20260819-022708-507b1e",
+        "tool_steps": 0,
+        "user_request": "Resume after benchmark workspace drift and rebuild runtime state."
+      },
+      "task_state_relpath": "workspace_mismatch_resume\\bench_repo_readme\\.codingforme\\runs\\run_20260819-022708-bb7c64\\task_state.json",
+      "tool_steps": 0,
+      "verifier_passed": true,
+      "within_budget": true
+    },
+    {
+      "allowed_tools": [
+        "read_file"
+      ],
+      "artifact_digest": "sha256:59fbb9743e934af1227bf95ae0c2eac409cac40ff2a0f2dc350462a11a0b5e82",
+      "artifact_exists": true,
+      "artifact_path": "README.md",
+      "attempts": 1,
+      "budget_enforced": true,
+      "category": "durable-contract",
+      "check_results": {
+        "fail_to_pass": [
+          {
+            "detail": "",
+            "kind": "report_length",
+            "passed": true,
+            "target": "durable_promotions"
+          },
+          {
+            "detail": "",
+            "kind": "file_contains",
+            "passed": true,
+            "target": ".codingforme/memory/topics/project-conventions.md"
+          }
+        ],
+        "pass_to_pass": [
+          {
+            "detail": "",
+            "kind": "file_contains",
+            "passed": true,
+            "target": "README.md"
+          },
+          {
+            "detail": "",
+            "kind": "file_contains",
+            "passed": true,
+            "target": "README.md"
+          }
+        ]
+      },
+      "checks": {
+        "fail_to_pass": [
+          {
+            "field": "durable_promotions",
+            "kind": "report_length",
+            "length": 2
+          },
+          {
+            "kind": "file_contains",
+            "path": ".codingforme/memory/topics/project-conventions.md",
+            "text": "Preserve benchmark regression artifacts under artifacts/."
+          }
+        ],
+        "pass_to_pass": [
+          {
+            "kind": "file_contains",
+            "path": "README.md",
+            "text": "# Bench Repo README"
+          },
+          {
+            "kind": "file_contains",
+            "path": "README.md",
+            "text": "This is a placeholder benchmark fixture."
+          }
+        ]
+      },
+      "effective_max_steps": 16,
+      "expected_artifact": "README.md fixture stays available while durable promotion succeeds",
+      "expected_artifact_exists": true,
+      "fail_to_pass_passed": true,
+      "failure_category": null,
+      "final_answer": "Project convention: Preserve benchmark regression artifacts under artifacts/.\nDecision: Keep harness regression deterministic and reproducible.",
+      "fixture_copy_relpath": "durable_promotion_accept\\bench_repo_readme",
+      "fixture_repo": "tests/fixtures/bench_repo_readme",
+      "id": "durable_promotion_accept",
+      "initial_episodic_notes_empty": true,
+      "initial_history_empty": true,
+      "initial_memory_empty": true,
+      "initial_task_summary_empty": true,
+      "mutable_paths": [],
+      "non_failure_stop_reason": true,
+      "pass_to_pass_passed": true,
+      "passed": true,
+      "prompt": "Capture the stable benchmark facts as durable memory and respond with only the promoted facts.",
+      "regressions": [],
+      "report": {
+        "attempts": 1,
+        "checkpoint_id": "ckpt_9a0887dc",
+        "durable_promotions": [
+          "project-conventions: Preserve benchmark regression artifacts under artifacts/.",
+          "key-decisions: Keep harness regression deterministic and reproducible."
+        ],
+        "durable_rejections": [],
+        "durable_superseded": [],
+        "final_answer": "Project convention: Preserve benchmark regression artifacts under artifacts/.\nDecision: Keep harness regression deterministic and reproducible.",
+        "max_steps": 16,
+        "prompt_metadata": {
+          "budget_reductions": [],
+          "current_request": {
+            "dropped_chars": 0,
+            "raw_chars": 94,
+            "rendered_chars": 94,
+            "section_chars": 116,
+            "text": "Capture the stable benchmark facts as durable memory and respond with only the promoted facts.",
+            "truncated": false
+          },
+          "history": {
+            "collapsed_duplicate_reads": 0,
+            "older_entries_count": 0,
+            "raw_chars": 113,
+            "rendered_chars": 113,
+            "reused_file_summary_count": 0,
+            "summarized_tool_count": 0
+          },
+          "history_batched_turns": 0,
+          "history_chars": 101,
+          "history_tool_calls_replayed": 0,
+          "memory_chars": 188,
+          "message_count": 5,
+          "message_layout": {
+            "checkpoint_split_out": false,
+            "memory_own_message": true,
+            "name": "stable-system-v3",
+            "workspace_split_out": true
+          },
+          "message_roles": {
+            "system": 1,
+            "user": 4
+          },
+          "messages_chars": 3999,
+          "native_tool_calls": true,
+          "prefix_changed": false,
+          "prefix_chars": 4435,
+          "prefix_hash": "798df8fd76636bb39aa0a853c22379c17ad4f935c130d18981ccaee1e6a41f9c",
+          "prompt_budget_chars": 12000,
+          "prompt_cache_key": "798df8fd76636bb39aa0a853c22379c17ad4f935c130d18981ccaee1e6a41f9c",
+          "prompt_cache_supported": false,
+          "prompt_chars": 4048,
+          "prompt_over_budget": false,
+          "recent_commits": 4,
+          "reduction_order": [
+            "relevant_memory",
+            "history",
+            "memory",
+            "prefix"
+          ],
+          "relevant_memory": {
+            "limit": 3,
+            "raw_chars": 23,
+            "rendered_chars": 23,
+            "rendered_count": 0,
+            "rendered_notes": [],
+            "selected_count": 0,
+            "selected_durable_count": 0,
+            "selected_kinds": [],
+            "selected_notes": [],
+            "selected_sources": []
+          },
+          "request_chars": 94,
+          "resume_status": "no-checkpoint",
+          "runtime_identity_mismatch_fields": [],
+          "secret_env_count": 0,
+          "secret_env_names": [],
+          "section_budgets": {
+            "current_request": null,
+            "history": 5200,
+            "memory": 1600,
+            "prefix": 3600,
+            "relevant_memory": 1200
+          },
+          "section_order": [
+            "prefix",
+            "memory",
+            "relevant_memory",
+            "history",
+            "current_request"
+          ],
+          "sections": {
+            "current_request": {
+              "budget_chars": null,
+              "raw_chars": 116,
+              "rendered_chars": 116
+            },
+            "history": {
+              "budget_chars": 5200,
+              "raw_chars": 113,
+              "rendered_chars": 113
+            },
+            "memory": {
+              "budget_chars": 1600,
+              "raw_chars": 188,
+              "rendered_chars": 188
+            },
+            "prefix": {
+              "budget_chars": 3600,
+              "raw_chars": 4435,
+              "rendered_chars": 3600
+            },
+            "relevant_memory": {
+              "budget_chars": 1200,
+              "raw_chars": 23,
+              "rendered_chars": 23
+            }
+          },
+          "stale_paths": [],
+          "stale_summary_invalidations": 0,
+          "text_protocol_tool_calls": 0,
+          "tool_count": 7,
+          "tool_signature": "8b879fd02e70ef1b7526181cbccfc9574b25aeefe8de28dc009ac3f163b42ff0",
+          "workspace_changed": false,
+          "workspace_chars": 1816,
+          "workspace_docs": 1,
+          "workspace_fingerprint": "6f465b8d7e5787f0ff4dad90a8daef3e22232c80a77fcee93aae262b285dd2d3"
+        },
+        "redacted_env": {
+          "secret_env_count": 0,
+          "secret_env_names": []
+        },
+        "resume_status": "no-checkpoint",
+        "run_id": "run_20260819-022708-932057",
+        "run_seq": 1,
+        "session_id": "20260819-022708-41975b",
+        "status": "completed",
+        "stop_reason": "final_answer_returned",
+        "task_id": "task_20260819-022708-88127c",
+        "task_state": {
+          "attempts": 1,
+          "checkpoint_id": "ckpt_9a0887dc",
+          "final_answer": "Project convention: Preserve benchmark regression artifacts under artifacts/.\nDecision: Keep harness regression deterministic and reproducible.",
+          "last_tool": "",
+          "resume_status": "no-checkpoint",
+          "run_id": "run_20260819-022708-932057",
+          "run_seq": 1,
+          "session_id": "20260819-022708-41975b",
+          "status": "completed",
+          "stop_reason": "final_answer_returned",
+          "task_id": "task_20260819-022708-88127c",
+          "tool_steps": 0,
+          "user_request": "Capture the stable benchmark facts as durable memory and respond with only the promoted facts."
+        },
+        "tool_steps": 0
+      },
+      "report_relpath": "durable_promotion_accept\\bench_repo_readme\\.codingforme\\runs\\run_20260819-022708-932057\\report.json",
+      "run_dir_relpath": "durable_promotion_accept\\bench_repo_readme\\.codingforme\\runs\\run_20260819-022708-932057",
+      "run_id": "run_20260819-022708-932057",
+      "status": "pass",
+      "step_budget": 2,
+      "step_ceiling_hit": false,
+      "stop_reason": "final_answer_returned",
+      "task_state": {
+        "attempts": 1,
+        "checkpoint_id": "ckpt_9a0887dc",
+        "final_answer": "Project convention: Preserve benchmark regression artifacts under artifacts/.\nDecision: Keep harness regression deterministic and reproducible.",
+        "last_tool": "",
+        "resume_status": "no-checkpoint",
+        "run_id": "run_20260819-022708-932057",
+        "run_seq": 1,
+        "session_id": "20260819-022708-41975b",
+        "status": "completed",
+        "stop_reason": "final_answer_returned",
+        "task_id": "task_20260819-022708-88127c",
+        "tool_steps": 0,
+        "user_request": "Capture the stable benchmark facts as durable memory and respond with only the promoted facts."
+      },
+      "task_state_relpath": "durable_promotion_accept\\bench_repo_readme\\.codingforme\\runs\\run_20260819-022708-932057\\task_state.json",
+      "tool_steps": 0,
+      "verifier_passed": true,
+      "within_budget": true
+    },
+    {
+      "allowed_tools": [
+        "read_file"
+      ],
+      "artifact_digest": "sha256:59fbb9743e934af1227bf95ae0c2eac409cac40ff2a0f2dc350462a11a0b5e82",
+      "artifact_exists": true,
+      "artifact_path": "README.md",
+      "attempts": 1,
+      "budget_enforced": true,
+      "category": "durable-contract",
+      "check_results": {
+        "fail_to_pass": [
+          {
+            "detail": "",
+            "kind": "report_equals",
+            "passed": true,
+            "target": "durable_rejections"
+          },
+          {
+            "detail": "",
+            "kind": "report_equals",
+            "passed": true,
+            "target": "durable_promotions"
+          }
+        ],
+        "pass_to_pass": [
+          {
+            "detail": "",
+            "kind": "file_contains",
+            "passed": true,
+            "target": "README.md"
+          },
+          {
+            "detail": "",
+            "kind": "file_contains",
+            "passed": true,
+            "target": "README.md"
+          }
+        ]
+      },
+      "checks": {
+        "fail_to_pass": [
+          {
+            "field": "durable_rejections",
+            "kind": "report_equals",
+            "value": [
+              "dependency-facts:secret_shaped",
+              "key-decisions:transient_task_state"
+            ]
+          },
+          {
+            "field": "durable_promotions",
+            "kind": "report_equals",
+            "value": [
+              "project-conventions: Keep verifier outcomes stable across reruns."
+            ]
+          }
+        ],
+        "pass_to_pass": [
+          {
+            "kind": "file_contains",
+            "path": "README.md",
+            "text": "# Bench Repo README"
+          },
+          {
+            "kind": "file_contains",
+            "path": "README.md",
+            "text": "This is a placeholder benchmark fixture."
+          }
+        ]
+      },
+      "effective_max_steps": 16,
+      "expected_artifact": "README.md fixture stays available while durable rejection is recorded",
+      "expected_artifact_exists": true,
+      "fail_to_pass_passed": true,
+      "failure_category": null,
+      "final_answer": "Project convention: Keep verifier outcomes stable across reruns.\nDependency: API key is sk-benchmark-secret.\nDecision: Current goal is debug the harness.",
+      "fixture_copy_relpath": "durable_promotion_reject\\bench_repo_readme",
+      "fixture_repo": "tests/fixtures/bench_repo_readme",
+      "id": "durable_promotion_reject",
+      "initial_episodic_notes_empty": true,
+      "initial_history_empty": true,
+      "initial_memory_empty": true,
+      "initial_task_summary_empty": true,
+      "mutable_paths": [],
+      "non_failure_stop_reason": true,
+      "pass_to_pass_passed": true,
+      "passed": true,
+      "prompt": "Capture only the stable benchmark facts into durable memory and reject anything transient or secret-shaped.",
+      "regressions": [],
+      "report": {
+        "attempts": 1,
+        "checkpoint_id": "ckpt_4640ea96",
+        "durable_promotions": [
+          "project-conventions: Keep verifier outcomes stable across reruns."
+        ],
+        "durable_rejections": [
+          "dependency-facts:secret_shaped",
+          "key-decisions:transient_task_state"
+        ],
+        "durable_superseded": [],
+        "final_answer": "Project convention: Keep verifier outcomes stable across reruns.\nDependency: API key is sk-benchmark-secret.\nDecision: Current goal is debug the harness.",
+        "max_steps": 16,
+        "prompt_metadata": {
+          "budget_reductions": [],
+          "current_request": {
+            "dropped_chars": 0,
+            "raw_chars": 107,
+            "rendered_chars": 107,
+            "section_chars": 129,
+            "text": "Capture only the stable benchmark facts into durable memory and reject anything transient or secret-shaped.",
+            "truncated": false
+          },
+          "history": {
+            "collapsed_duplicate_reads": 0,
+            "older_entries_count": 0,
+            "raw_chars": 126,
+            "rendered_chars": 126,
+            "reused_file_summary_count": 0,
+            "summarized_tool_count": 0
+          },
+          "history_batched_turns": 0,
+          "history_chars": 114,
+          "history_tool_calls_replayed": 0,
+          "memory_chars": 201,
+          "message_count": 5,
+          "message_layout": {
+            "checkpoint_split_out": false,
+            "memory_own_message": true,
+            "name": "stable-system-v3",
+            "workspace_split_out": true
+          },
+          "message_roles": {
+            "system": 1,
+            "user": 4
+          },
+          "messages_chars": 4038,
+          "native_tool_calls": true,
+          "prefix_changed": false,
+          "prefix_chars": 4435,
+          "prefix_hash": "1dba9ad52db63dbcfe2ce976196cd8270a5e10cd8bd2b5cc66f8ed23e978bcad",
+          "prompt_budget_chars": 12000,
+          "prompt_cache_key": "1dba9ad52db63dbcfe2ce976196cd8270a5e10cd8bd2b5cc66f8ed23e978bcad",
+          "prompt_cache_supported": false,
+          "prompt_chars": 4087,
+          "prompt_over_budget": false,
+          "recent_commits": 4,
+          "reduction_order": [
+            "relevant_memory",
+            "history",
+            "memory",
+            "prefix"
+          ],
+          "relevant_memory": {
+            "limit": 3,
+            "raw_chars": 23,
+            "rendered_chars": 23,
+            "rendered_count": 0,
+            "rendered_notes": [],
+            "selected_count": 0,
+            "selected_durable_count": 0,
+            "selected_kinds": [],
+            "selected_notes": [],
+            "selected_sources": []
+          },
+          "request_chars": 107,
+          "resume_status": "no-checkpoint",
+          "runtime_identity_mismatch_fields": [],
+          "secret_env_count": 0,
+          "secret_env_names": [],
+          "section_budgets": {
+            "current_request": null,
+            "history": 5200,
+            "memory": 1600,
+            "prefix": 3600,
+            "relevant_memory": 1200
+          },
+          "section_order": [
+            "prefix",
+            "memory",
+            "relevant_memory",
+            "history",
+            "current_request"
+          ],
+          "sections": {
+            "current_request": {
+              "budget_chars": null,
+              "raw_chars": 129,
+              "rendered_chars": 129
+            },
+            "history": {
+              "budget_chars": 5200,
+              "raw_chars": 126,
+              "rendered_chars": 126
+            },
+            "memory": {
+              "budget_chars": 1600,
+              "raw_chars": 201,
+              "rendered_chars": 201
+            },
+            "prefix": {
+              "budget_chars": 3600,
+              "raw_chars": 4435,
+              "rendered_chars": 3600
+            },
+            "relevant_memory": {
+              "budget_chars": 1200,
+              "raw_chars": 23,
+              "rendered_chars": 23
+            }
+          },
+          "stale_paths": [],
+          "stale_summary_invalidations": 0,
+          "text_protocol_tool_calls": 0,
+          "tool_count": 7,
+          "tool_signature": "8b879fd02e70ef1b7526181cbccfc9574b25aeefe8de28dc009ac3f163b42ff0",
+          "workspace_changed": false,
+          "workspace_chars": 1816,
+          "workspace_docs": 1,
+          "workspace_fingerprint": "af7341a3f50e8e7b84b1a674bc9d22bbed787c8afe026c004b7225677ae2483b"
+        },
+        "redacted_env": {
+          "secret_env_count": 0,
+          "secret_env_names": []
+        },
+        "resume_status": "no-checkpoint",
+        "run_id": "run_20260819-022709-e1002d",
+        "run_seq": 1,
+        "session_id": "20260819-022709-8b8de3",
+        "status": "completed",
+        "stop_reason": "final_answer_returned",
+        "task_id": "task_20260819-022709-3da6ee",
+        "task_state": {
+          "attempts": 1,
+          "checkpoint_id": "ckpt_4640ea96",
+          "final_answer": "Project convention: Keep verifier outcomes stable across reruns.\nDependency: API key is sk-benchmark-secret.\nDecision: Current goal is debug the harness.",
+          "last_tool": "",
+          "resume_status": "no-checkpoint",
+          "run_id": "run_20260819-022709-e1002d",
+          "run_seq": 1,
+          "session_id": "20260819-022709-8b8de3",
+          "status": "completed",
+          "stop_reason": "final_answer_returned",
+          "task_id": "task_20260819-022709-3da6ee",
+          "tool_steps": 0,
+          "user_request": "Capture only the stable benchmark facts into durable memory and reject anything transient or secret-shaped."
+        },
+        "tool_steps": 0
+      },
+      "report_relpath": "durable_promotion_reject\\bench_repo_readme\\.codingforme\\runs\\run_20260819-022709-e1002d\\report.json",
+      "run_dir_relpath": "durable_promotion_reject\\bench_repo_readme\\.codingforme\\runs\\run_20260819-022709-e1002d",
+      "run_id": "run_20260819-022709-e1002d",
+      "status": "pass",
+      "step_budget": 2,
+      "step_ceiling_hit": false,
+      "stop_reason": "final_answer_returned",
+      "task_state": {
+        "attempts": 1,
+        "checkpoint_id": "ckpt_4640ea96",
+        "final_answer": "Project convention: Keep verifier outcomes stable across reruns.\nDependency: API key is sk-benchmark-secret.\nDecision: Current goal is debug the harness.",
+        "last_tool": "",
+        "resume_status": "no-checkpoint",
+        "run_id": "run_20260819-022709-e1002d",
+        "run_seq": 1,
+        "session_id": "20260819-022709-8b8de3",
+        "status": "completed",
+        "stop_reason": "final_answer_returned",
+        "task_id": "task_20260819-022709-3da6ee",
+        "tool_steps": 0,
+        "user_request": "Capture only the stable benchmark facts into durable memory and reject anything transient or secret-shaped."
+      },
+      "task_state_relpath": "durable_promotion_reject\\bench_repo_readme\\.codingforme\\runs\\run_20260819-022709-e1002d\\task_state.json",
+      "tool_steps": 0,
+      "verifier_passed": true,
+      "within_budget": true
+    }
+  ],
+  "runtime": {
+    "branch": "main",
+    "commit_sha": "b2465db4836388d56dc0c2fae63e47791e7af208"
+  },
+  "schema_version": 2,
+  "summary": {
+    "failed": 0,
+    "failure_category_counts": {},
+    "pass_rate": 1.0,
+    "passed": 12,
+    "total_tasks": 12,
+    "verifier_pass_rate": 1.0,
+    "verifier_passes": 12,
+    "within_budget": 12,
+    "within_budget_rate": 1.0
+  }
+}
