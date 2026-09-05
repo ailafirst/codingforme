@@ -2,6 +2,71 @@
 
 本项目的版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。0.x 阶段,次版本号的变化即可能包含破坏性改动。
 
+## [0.3.0] - 2026-09-05
+
+这一版把上下文治理从"一根裁剪线"做成分级流水线(阶段三~十二):`history` 变成只追加的事实记录、发给模型的是它按预算与新鲜度算出的一次投影;超限工具结果落盘可取回、过期读会被标记、最近窗口按块推进以保住前缀缓存;预算改由上下文窗口派生而不是写死常量。另修复了一个生产级缺口——系统提示词此前从未教模型长期记忆的写法,导致"记住这件事"类请求静默不生效。
+
+### 新增
+
+- **消息投影层(阶段三)**:`history` 是只追加、一个字节不改的事实记录,发给模型的那份是它的一次投影。「这一条这次怎么呈现」从散在 `_compressed_history_entries()` 里的一串 if 分支变成十个一等的形态常量(`POLICY_FULL` / `CLIPPED` / `FILE_SUMMARY` / `POINTER` / `ERROR_KEPT` / `SHELL_HEAD` / `NOT_EXECUTED` / `CLEARED` / `SQUEEZED` / `DROPPED` 加 `STRUCTURAL`),决策(`_policy_for()` / `_old_tool_policy()`)与渲染(`_render_policy()`)拆开。**分支行为一条没变**,变的是它们可以被整组验:`test_every_policy_combination_keeps_the_tool_calls_paired` 枚举 10³ 种形态组合 × 「哪几条活过预算」的掩码,逐个验「每个 `tool_call` 恰好配一条同 `tool_call_id` 的 `tool` 消息」——这是唯一一条错了会让整个请求被后端拒掉、而不是降级的约束;`test_every_policy_is_reachable_from_a_real_history` 保证没有永远选不中的死形态。
+- **最近窗口的条目数上限也按块推进**(`_recent_start_by_tool_turns(..., block=)`)。`RECENT_WINDOW_BLOCK` 从前只量化了工具轮那条边界,条目数上限 `len(history) - 2×tool_turns`(管「工具很少、对话很多」的历史)每多两条对话就往前推两格,消息数组从那里往后全部改写。实测 24 轮真实压力探针、预算 12,423、**一次裁剪都没触发**:前缀被改写的轮次 **15 → 5**,估算前缀命中率 46.3% → **73.1%**,估算未命中 token **52,510 → 27,266(−48.1%)**;代价是总 prompt token +3.7%(向下取整让窗口浮动着变大,最多多留 5 条全文条目,方向与 `_blocked_recent_window()` 一致)。**这是这套上下文工程里少见的、在没有任何预算压力的常规运行上就能兑现的收益**,而常规运行正是真实跑批的形态。关掉 `recent_window_block` 时两条边界一起退回老行为。
+- **`prompt_metadata["history"]` 新增 `squeezed_entry_count` 与 `recent_start`**。前者是「预算不够时被压扁成 10 token 残句、而不是整条丢弃」的条目数——压扁就是 Claude Code L4(可逆折叠)的等价物,它一直藏在保留循环里,既没有名字也没有计数,于是和整条丢弃在工件上长得一模一样;后者是最近窗口边界这一轮落在哪条,按块推进的效果只能对着它读。
+- **会话摘要(阶段二:Claude Code 自动压缩里**便宜的那一半**)**:压力到触发点时,把最早的一批历史条目整体换成一份确定性摘要(**不调模型**),覆盖点与摘要文本存进 `session["context_summary"]`,跟着落盘与 resume;摘要只在推进覆盖点的那一轮重新生成。配 `session_summary` 消融开关(默认开)、`no_session_summary` 变体,以及 `context_pressure.session_summary` 六个字段(零值也写)与 `message_layout.session_summary_present`。**兑现的是信息保全**:从前 24 轮压力探针最后只剩一行「dropped 39 entries」、用户第 1 轮定的规格已经不在上下文里,现在它的原文仍在。**没兑现缓存 churn,而且适用条件可以量出来**:覆盖点不许吃进最近那截历史,那截本身超过目标点时覆盖点就被顶死在一个每轮只涨 2 的上限上——实测每条对话 96 token 时边界移动 7 → 1、token 省 5.7%,206 token 时 14 → 5、token 多花 8.2%,306 token 时 19 → 19 完全无效。真实探针属于最后一档。详见 `docs/architecture/compression-pipeline-migration.md` §2.3,并由 `test_the_summary_is_inert_once_the_protected_tail_alone_exceeds_the_target` 锁住,免得下一轮靠调比例去救它。
+- **`context_pressure_absorbed` 的判据改成「任意一级压缩」**(逐段硬裁 `budget_reductions` 或会话摘要 `session_summary.compactions`)。只数前者的话,摘要一步把占用率压回目标点以下时 `budget_reductions` 是空的,这条断言在阶段二之后会变成恒挂。
+- **分级压缩(迁移 Claude Code 五级流水线的阶段一)**:上下文占用率到 `COMPRESSION_TRIGGER_RATIO = 0.85` 就开始压、一压压到 `COMPRESSION_TARGET_RATIO = 0.70` 以下,取代从前「只有 `prompt_tokens > total_budget` 一根线、裁到刚好不超为止」的做法。配 `graded_compression` 消融开关(默认开)与 `no_graded_compression` 变体,以及 `prompt_metadata["context_pressure"]`(occupancy_before/after、trigger/target、freed_tokens,零值也写)。同一条 24 轮压力会话 A/B:峰值占用 100.0% → 77.4%,24 轮 prompt token 合计 88,721 → 69,725(**−21.4%**),代价是多丢 4 条历史条目。**迟滞那一半试过、实测无效已撤掉**——边界是预算驱动的,对话单调增长时任何守预算的丢弃策略都必须每轮多丢一点,只能靠会话摘要那种「偶尔一次大跳」解决。
+- **`HarnessSpec.context_window` 与 `window_32k` / `window_16k` 变体**:走 `set_context_window()`,整条派生链(预算算式、`tool_output_limit()`、计划转录上限、`context_budget_breakdown`)跟着走;直接写 `total_budget` 只改总数,工件上 `context_window_tokens` 会和它对不上。
+- **压力探针会话 `long_dialogue_pressure`(24 轮纯对话)与 L3 断言 `context_pressure_absorbed`**:三个条件同时成立才通过——裁剪轮次达标(确实压到了)、没有一轮超预算(压住了)、没有一轮裁到底还不够。加它是因为工具结果那条路径上的压力被 L1 落盘和 L3 热尾吃干净了,三个窗口档位 178 个真实预算轮次`budget_reductions` 恒为 0;user/assistant 文本是这两级都碰不到的唯一成分。
+- **`patch_file` 新增追加用法：`old_text` 传空串 = 把 `new_text` 接到文件末尾**（文件不以换行结尾时先补一个换行），回一句 `appended to <path>` 加同样格式的片段回显。这不是放宽「`old_text` 必须精确命中一次」那条约束——空串在任何文件里都出现无数次，本来就永远不可能是一次合法替换。加它是因为实测模型想追加一行时**自发**就发这个形状（一次 k=3 的 live 跑批里 3 次有 2 次），而它从前只换回一句 `old_text must not be empty`，白烧一步加一个约 17 秒的往返，`arguments_valid` 只剩 1/3。prefix 里那条规则同步改成 “Required tool arguments must all be provided”（原文 “must not be empty” 会把模型从这条合法用法上推开）。**注意这会改 `tool_signature()`**，老 session 第一次 resume 报 `workspace-mismatch` 是预期行为。
+- **两个消融开关,把上下文工程的收益变成可测量的**:`no_tool_output_spill`(关掉超限结果的落盘与指针,退回 `clip()` 截断)与 `no_window_block`(关掉最近窗口的按块推进,退回每个工具轮推一格)。两者默认都是**开**,关掉时严格退回机制出现之前的行为。加它们是因为三个阶段此前只验证到「机制正确、没有回归」,而「机制有没有收益」在工件上根本无从判断——同一份负载跑一次开、跑一次关,是唯一的量法。
+- **`scripts/run_context_stress.py` 新增 `--harness` / `--max-steps`,以及第五个探针 `forced_spill_1m`**;每跑完一个探针就落一次盘(一次跑满 44 步的探针曾因为模型答案里有个 emoji 在最后一步 `UnicodeEncodeError`,整批结果全丢)。探针定义里新增 `expect`:这道题正确答案里必然出现的字面串,全部命中才记 `answered`——没有硬的结果指标,「省了上下文」和「省了上下文但把答案弄丢了」分不出来。
+- **`scripts/compare_context_ab.py`**:把两份探针工件并排成对照表(答对 / 步数 / 输入 token / 缓存命中占比 / 落盘与占位计数)。对照口径写死在脚本里,免得手工读 JSON 时只挑对自己有利的那一列。
+- **`scripts/measure_tool_output_ceiling.py`**:量「哪个工具的输出够得着落盘门槛」。实测 1M 档(单条上限 14,791)下只有 `read_file` 够得着——`search` 因为自己的 200 条命中上限封顶 12,699 token(门槛的 86%),`list_files` 的树更小。这解释了为什么真实跑批里 `spilled_calls` 长期是 0:不只是基准文件太小,而是入口上限分层之后,1M 档的落盘只剩 `read_file` 一条触发路径。
+- **超长工具结果落盘(阶段三 L1)**。单次工具输出超过 `context_manager.tool_output_limit(total_budget)` 时,全文写进 `<workspace>/.codingforme/tool_outputs/<run_id>/<n>-<tool>.txt`,上下文里只留头部预览加一行指针:`[full output saved to <正斜杠相对路径> (N tokens); use read_file on that path to see the rest]`。取回走已有的 `read_file`,不新增工具。落盘目录必须在 workspace root 之下(否则 `path()` 会挡住模型读回来),落盘前过 `redact_text()`,任何一步失败退回普通 `clip()` 而不抛异常。实测本仓库 8k 档:`search("def ")` 28,416 → 1,287 token,`read_file("codingforme/runtime.py", 1..3000)` 35,679 → 1,286。
+- **`tool_executed` 事件新增 `tool_output_spilled` / `tool_output_spill_path` / `tool_output_full_tokens` / `tool_output_kept_tokens`**,`prompt_metadata["history"]` 新增 `recent_tool_window` / `spilled_pointer_count` / `preserved_error_count`,跑批汇总新增 `aggregates["tool_usage"]["spill"]`。零值也照常渲染,markdown 里明说「一次都没触发」——省略这一节会被读成「这块没问题」。
+- **`/context` 斜杠命令**:不带参数显示当前窗口档位、来源和**逐项**预算算式,`/context 128k` 现场换档(`128000` / `1m` 同样认,不在档位上的值向下取整并明说)。配套 `CodingForMe.set_context_window()` 与 `models.parse_window_tokens()`——后者是 CLI 参数、环境变量、斜杠命令共用的唯一解析器。
+- **`--context-window` 参数与 `CODINGFORME_CONTEXT_WINDOW` 环境变量**,覆盖自动探测。
+- **`prompt_metadata` 新增 `context_window_tokens` / `context_window_source` / `budget_floor_exhausted` / `protected_sections`**。`budget_floor_exhausted` 和「刚好装下」在别的字段上看不出区别,而含义相反:该调预算,不是该继续裁。
+- **供给侧新鲜度(阶段五)**:`read_file` 之后同一个文件又被写过,那条记录里是**改动之前**的内容,而它和"文件现在就长这样"在模型眼里完全一样——实测后果是 `patch_file` 的 `old_text` 从这段过期内容里抄出来、命中 0 次被打回。窗口内的过期读整条换成 `STALE_READ_MARKER`(调用签名照留);窗口外已落盘的过期读,指针照留(那是取回的唯一线索)、后面追加 `STALE_SPILL_MARKER` 说明盘上那份也是旧版。判定看 history 里"这条 `read_file` 之后有没有对同一路径的写"(`wrote` 字段来自快照 sha256 差异,不是 args 里的 `path`,因此 `run_shell`/`run_plan` 改的文件与失败的写都算得对)。配 `stale_read_invalidation` 消融开关(默认开)/ 变体 `no_stale_read`,观测 `prompt_metadata["history"]` 的 `stale_read_count` / `stale_pointer_count`。
+- **可逆折叠有了对照组**:`reversible_squeeze` 消融开关(默认开)/ 变体 `no_reversible_squeeze`。关掉就退回它被命名之前的行为——窗口外放不下的条目整条丢弃,只在 `Omitted context:` 里留个数;开着则压成一句保留开头的 10 token 残句。两条属性测试锁住"L4 完全可逆"这句话:压缩不改写 `session["history"]` 本身,预算放大后被压掉的内容原样回来。
+- **`scripts/run_compression_gate.py`**(阶段四开工判据):合成 24 轮对话 × 三档强度,查逐段硬裁还会不会被触发,不调模型、几秒钟跑完,只测 8k 一档。
+- **`scripts/run_system_gate.py`**(阶段十一):同一份判据横扫 8k/16k/32k/64k/128k 五个窗口档位,外加真实工具调用(落盘 / 过期读 / 最近窗口),查同一次会话里九个机制各自在每个档位上发生了什么,不调模型、约 2 分钟跑完。
+- **`scripts/run_compression_ratio.py`**(阶段十二):128k 档(生产实际生效窗口)在 7 档压力强度下的压缩率,压缩开(`full`)对比完全关(`no_context_reduction`)。
+- **`scripts/run_tool_pressure_matrix.py`**:量工具输出落盘与最近窗口机制在不同压力形状下的可恢复性——一次读回落盘内容会不会因为超过单条上限而被再次截断(实测全量重读会再次触发落盘,只有窄尾部窗口读才能避开)。
+- **`long_log_audit_token` 基准任务**(`tests/fixtures/bench_repo_spill`):4000 行日志里唯一一行 `AUDIT-TOKEN:` 在未知位置,工具白名单只给 `read_file` / `patch_file`(没有 `search`),逼模型手动分窗口读——专门用来触发超长工具结果落盘。
+
+### 修复(续)
+
+- **durable-memory 的格式约定第一次被写进系统提示词**。`extract_durable_promotions()` 只认以 `Project convention:` / `Decision:` / `Dependency:` / `Preference:`(或中文 项目约定：/决策：/依赖：/偏好：)开头的行,但这套格式此前从未出现在 `PROMPT_TEMPLATE` 里——模型说"好的我记住了"之类的自然语言永远不会命中,长期记忆提升因此在生产里静默失败。补一条规则后,cross-session 套件的真实模型跑批里 `session_evidence_surfaced` 0/4 → 4/4、`supersede_recorded` 0/1 → 1/1,L3 整体 8/14(57.1%)→ 13/14(92.9%),回归测试 469/472 基线不变(3 个已知 Windows 环境失败之外零新增失败)。
+
+### 破坏性改动
+
+- **窗口外的工具结果占位改成三种形态**。落过盘的换成带路径的指针(可恢复才可丢弃);内容以 `error:` 开头的**不清**,只裁到 `ERROR_KEEP_TOKENS = 90`(清掉失败的观察会让模型把同一个调用再发一遍,正好撞上重复调用检测);其余仍是 `CLEARED_RESULT_MARKER`。两个新分支都排在 `run_shell` 的摘要分支之前——后者只留前三行,而指针恒在末尾。
+- **最近窗口按块推进**(`RECENT_WINDOW_BLOCK = 3`)。`_blocked_recent_window()` 把「要清几条」向下取整到 3 的倍数,实际保留的工具结果在 6~8 条之间浮动。从前每轮重算意味着边界每轮往前推一格,消息数组从那个位置往后全变,前缀缓存每轮作废一次。
+- **`read_file` / `write_file` / `patch_file` 回给模型的路径统一成正斜杠**。`path.relative_to(agent.root)` 在 Windows 上给反斜杠,而这串东西会被模型原样喂回 `read_file`(落盘指针正是这么用的),同一段上下文在两个平台上形状不同是最难查的一类问题。`list_files(format="paths")` 早前踩过同一个坑。
+- **工具结果的入口上限从 `total_budget` 派生**。`workspace.MAX_TOOL_OUTPUT = 1320` 降级成下限,真正生效的是 `context_manager.tool_output_limit(total_budget)` = `clamp(total_budget // 8, 1320, 25000)`;`_compressed_history_entries()` 里写死的 `line_limit = 430` 取同一个值,等于取消 history 里的第二道裁剪。这两个常量是字符时代折算来的(4000÷3.02、900÷2.07)、与预算脱钩,实测把 `total_budget` 从 4,335 放大到 118,335(×27)时**发出去的 prompt 一个 token 都不变**(3,490 → 3,490),一个 5,599 token 的文件到模型眼前只剩 430 token。改后同一份 10 轮历史在 1M 档下:单条结果 430 → 5,599、history 段 2,723 → 33,794、整份 prompt 3,490 → 34,564(预算 118,335)。**输入 token 会明显上涨**,这是预算终于生效的直接后果。8k 兜底档不受影响(4335//8 = 541 < 1320 下限)。
+- **掉出最近窗口的工具结果改成显式占位**。`_summarize_old_tool_item()` 从前返回这次调用**自己的签名**(`[tool:read_file] {"path":"a.py"}`)、放在一条 `role:"tool"` 消息里,读起来像「这次调用什么都没返回」;现在追加 `CLEARED_RESULT_MARKER = "[cleared to save context; re-read if needed]"`,与官方 `clear_tool_uses_20250919` 的占位同义。每条被清的记录多约 13 个 token。
+- **计划转录的聚合上限跟着工具结果上限走**。`plans.MAX_TRANSCRIPT_TOKENS = 4000` 降级成下限,真正生效的是 `plans.transcript_limit(tool_output_limit)` = `max(4000, 3 × 单条上限)`,由 `runtime.execute_plan()` 写进新的 `PlanResult.transcript_limit`。倍数 3 是原设计就有的(「12000 字符 ≈ 三个普通工具调用的额度」);不跟着走的话 1M 档下单条结果能有 14,791 而整段转录仍卡在 4,000,同一次 `read_file` 放进计划里反而看得更少,`run_plan` 变成纯负收益。
+- **工件里没有额度的段记 `None` 而不是 `total_budget`**。起始额度等于总预算表达的是「不设上限」,记成数字会被读成「分到了这么多」——三段加起来是总预算的三倍。只有调用方显式给了额度、或裁剪循环真的把它压下去过,`sections[*].budget_tokens` 才是数字。
+- **上下文预算的单位从字符换成 token,系统里不再有第二种单位**。各段额度与下限、工具输出上限(`workspace.MAX_TOOL_OUTPUT`)、压平历史上限(`MAX_HISTORY`)、计划转录上限(`plans.MAX_TRANSCRIPT_TOKENS`)、记忆里的笔记与 task_summary 上限(`memory.NOTE_TOKENS` / `TASK_SUMMARY_TOKENS`)全部按 token 算。工件里所有 `*_chars` 字段改名 `*_tokens`,`prompt_chars` / `prompt_budget_chars` 直接删除——同时摆两种单位,读的人无从知道某个数是哪一种。
+- **`total_budget` 从上下文窗口派生,不再写死**。`models.resolve_context_window()` 四层解析(显式配置 > 已知后端表 > litellm 注册表 > 保守默认 8k),向下取整到 `WINDOW_BUCKETS` 的档位;`budget_breakdown()` 再扣输出预留、工具 schema、消息结构开销,最后乘分词器容差。`HarnessSpec` 的 `total_budget` 字段含义随之变化,跨版本的评测工件不可直接比较。
+- **各段固定额度取消**。`DEFAULT_SECTION_BUDGETS`(prefix 1450 / memory 520 / relevant_memory 900 / history 2500)与 `DEFAULT_SECTION_FLOORS` 删除,换成起始额度 = `total_budget`、下限 = `SECTION_FLOORS` 常量。那组数是绝对值、与 `total_budget` 脱钩,实测两个方向都错:1M 档下四段合计 5,370 只占预算(118,335)的 4.5%,裁剪循环永远触发不了、各段却照样每轮被砍(本仓库 prefix 原始 3,696 token 被裁到 1,450,白丢 61%);8k 兜底档下 5,370 是预算(4,335)的 123.9%,额度之和比总预算还大,每轮都在跑裁剪循环。`prompt_metadata` 里各段的 `budget_tokens` 随之改变含义。
+- **`prefix` 完全没有额度**。从前 `PROTECTED_SECTIONS` 只挡住超预算时的**进一步**压缩,基础额度 1450 每轮照裁不误,且因为 `_tail_clip` 保留开头,丢掉的全是仓库快照那一段。现在 `section_budgets` 里传 `prefix` 会被 `ContextManager.__init__` 和 `evaluator._apply_task_setup()` 两处一起丢掉,工件里 `sections.prefix.budget_tokens` 恒为 `None`。
+- **数据集 `setup` 新增 `section_floors`**,并且 `setup.section_budgets` 里的 `prefix` 会被忽略。`benchmarks/coding_tasks.json` 的 `context_reduction_checkpoint` 随之调整:它靠"裁剪真的发生"来触发 `checkpoint_created`,而常量下限(history 720)比这个 fixture 的历史(约 440 token)还大,够不着。
+
+### 修复
+
+- **`budget_floor_exhausted` 的判据改成由裁剪循环自己报**(走完整条 `reduction_order` 一个 section 都动不了)。旧判据查 `budgets[section] <= floor`,而各段起始额度现在是 `total_budget`,一个天然比下限还小的 section 一进循环就被跳过、额度永远不会被写回,那个查法恒为假。
+- **关掉裁剪的那条路径不再拿字符数冒充 token 额度**。`_render_sections_without_reduction()` 里 `budget=len(text)` 会经 metadata 落进 `budget_tokens` 字段,单位是错的;现在一律记 `None`。
+- **一次裁剪至少腾出预算的 1/10**(`CLEAR_AT_LEAST_DIVISOR = 10`)。从前 `new_budget = max(floor, current_budget - overflow)` 只裁刚好够的量,下一轮几乎必然再裁一次,而每裁一次 history 就作废它之后的全部前缀缓存。官方 context management API 为同一件事留了 `clear_at_least`(「ensures cache invalidation worthwhile」)。`budget_reductions[]` 新增 `target_tokens`,和 `overflow_tokens` 不同即说明它生效了。
+- **仓库快照有了入口上限 `workspace.MAX_SNAPSHOT_TOKENS = 8000`**。prefix 现在不裁,没有这条线时一个 `git status` 刷出几千行的仓库能直接把预算吃光。正常仓库碰不到:实测本仓库整份快照 3,058 token(project_docs 2,562 / status 200 / recent_commits 129 / project_tree 104),最坏情况约 6,500。
+- **预算算式里的乘性安全系数换成按消息条数的绝对扣除**。`BUDGET_SAFETY_RATIO = 0.8` 删除,改为 `MESSAGE_FRAMING_BASE_TOKENS + 20 × 预计消息条数` 加一个 5% 的 `TOKENIZER_MARGIN_RATIO`。实测 23 轮真实请求(`scripts/measure_token_accounting.py`),`input_tokens − prompt_tokens − schema` 对消息条数回归 R²=0.838、对 prompt 长度回归只有 0.396——开销跟着有几条消息走,不跟着 prompt 多长走。旧系数在 128k 档一次扔掉 25,600 token 去覆盖一笔实测约 1,200 的开销,在 8k 档又把 schema 和输出预留一起打了八折。mimo-v2.5 的预算 100,063 → 118,335。
+- **预算触底不再静默**。`context_budget_tokens()` 成为 `budget_breakdown()` 的薄封装,后者返回逐项字典并带 `floored`;逐项进 `prompt_metadata["context_budget_breakdown"]` 和 `/context` 的显示。
+- **`prefix` 不再参与超预算裁剪**。它曾排在裁剪顺序最后当兜底项,而实测 632 轮真实跑批里超预算的 67 轮(10.6%)**每一轮都用到了这个兜底项**。prefix 就是前缀缓存认的那段公共前缀,裁一次那轮必然落空,而省下的只有几百 token。现在由 `PROTECTED_SECTIONS` 过滤,自定义裁剪顺序也挡得住。
+- **字符上限折算成 token 时按内容类型分别折算**,不再统一折半。实测字符/token 比随内容差 2.4 倍(模型写的中文笔记 1.31、工具 schema 3.95),一个除数会让一部分限额凭空放宽 1.5 倍、另一部分砍掉四成。
+- **`OMITTED_DIGEST_BUDGET` 的单位对齐**:它走按 token 裁剪的 `_tail_clip`,而值还是当年的 400「字符」,等于把上限悄悄放宽约 3 倍;现按内容实测折算成 135 token。
+- **计数与截断统一用 `litellm.encode`**。`token_counter()` 和 `encode()` 对同一模型名结果不一致,中文上差 40%(按 encode 裁到 290 token,用 token_counter 数只有 175),额度会被静默吃掉四成。
+- **评测 fixture 复制时排除 `.codingforme` 等运行产物**(`shutil.copytree(..., ignore=...)`),上一次运行的 session 不再泄进下一次的工作区。
+
 ## [0.2.5] - 2026-08-28
 
 这一版把"评测"从散在各处的实验脚本收敛成一套有坐标系的体系,并让控制循环真正用上标准 messages 数组:一轮可以发多个工具调用,上下文按变更频率分层摆位。附带一个默认关闭的受限编排工具 `run_plan`。
