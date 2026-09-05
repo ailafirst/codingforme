@@ -129,7 +129,7 @@ def aggregate_run_artifacts(runs_root):
 
     tool_steps = [int(report.get("tool_steps", 0)) for report in reports]
     attempts = [int(report.get("attempts", 0)) for report in reports]
-    prompt_chars = [int((report.get("prompt_metadata") or {}).get("prompt_chars", 0)) for report in reports]
+    prompt_tokens = [int((report.get("prompt_metadata") or {}).get("prompt_tokens", 0)) for report in reports]
     cached_tokens = [int((report.get("prompt_metadata") or {}).get("cached_tokens", 0) or 0) for report in reports]
     cache_hits = [bool((report.get("prompt_metadata") or {}).get("cache_hit")) for report in reports]
     input_tokens = [int((report.get("prompt_metadata") or {}).get("input_tokens", 0) or 0) for report in reports]
@@ -147,7 +147,7 @@ def aggregate_run_artifacts(runs_root):
         "run_count": len(reports) if reports else len(run_dirs),
         "avg_tool_steps": _safe_mean(tool_steps),
         "avg_attempts": _safe_mean(attempts),
-        "avg_prompt_chars": _safe_mean(prompt_chars),
+        "avg_prompt_tokens": _safe_mean(prompt_tokens),
         "cache_hit_rate": _safe_ratio(sum(1 for hit in cache_hits if hit), len(cache_hits)),
         "cached_token_ratio": _safe_ratio(sum(cached_tokens), sum(input_tokens)),
         "avg_cached_tokens": _safe_mean(cached_tokens),
@@ -185,9 +185,9 @@ def measure_feature_ablation_metrics(agent, user_message):
         with _temporary_feature_flags(agent, updates):
             _, prompt, metadata = agent._build_context(user_message)
         results[name] = {
-            "prompt_chars": int(metadata.get("prompt_chars", 0)),
-            "memory_chars": int(metadata.get("sections", {}).get("memory", {}).get("rendered_chars", 0)),
-            "history_chars": int(metadata.get("sections", {}).get("history", {}).get("rendered_chars", 0)),
+            "prompt_tokens": int(metadata.get("prompt_tokens", 0)),
+            "memory_tokens": int(metadata.get("sections", {}).get("memory", {}).get("rendered_tokens", 0)),
+            "history_tokens": int(metadata.get("sections", {}).get("history", {}).get("rendered_tokens", 0)),
             "relevant_selected_count": int(metadata.get("relevant_memory", {}).get("selected_count", 0)),
             "budget_reduction_count": len(metadata.get("budget_reductions", [])),
             "current_request_preserved": prompt.endswith(f"Current user request:\n{user_message}"),
@@ -483,13 +483,13 @@ def run_context_stress_matrix(repetitions=5):
                                 }
                             )
                         metrics = measure_feature_ablation_metrics(agent, request_text)
-                        full_chars = metrics["full"]["prompt_chars"]
-                        raw_chars = metrics["no_context_reduction"]["prompt_chars"]
-                        ratio = _safe_ratio(raw_chars - full_chars, raw_chars)
+                        full_tokens = metrics["full"]["prompt_tokens"]
+                        raw_tokens = metrics["no_context_reduction"]["prompt_tokens"]
+                        ratio = _safe_ratio(raw_tokens - full_tokens, raw_tokens)
                         per_run.append(
                             {
-                                "full_prompt_chars": full_chars,
-                                "raw_prompt_chars": raw_chars,
+                                "full_prompt_tokens": full_tokens,
+                                "raw_prompt_tokens": raw_tokens,
                                 "compression_ratio": ratio,
                                 "current_request_preserved": bool(metrics["full"]["current_request_preserved"]),
                             }
@@ -501,8 +501,8 @@ def run_context_stress_matrix(repetitions=5):
                         "note_level": note_label,
                         "request_level": request_label,
                         "avg_prompt_compression_ratio": _safe_mean(item["compression_ratio"] for item in per_run),
-                        "avg_full_prompt_chars": _safe_mean(item["full_prompt_chars"] for item in per_run),
-                        "avg_raw_prompt_chars": _safe_mean(item["raw_prompt_chars"] for item in per_run),
+                        "avg_full_prompt_tokens": _safe_mean(item["full_prompt_tokens"] for item in per_run),
+                        "avg_raw_prompt_tokens": _safe_mean(item["raw_prompt_tokens"] for item in per_run),
                         "current_request_preserved_rate": _safe_ratio(
                             sum(1 for item in per_run if item["current_request_preserved"]),
                             len(per_run),
@@ -510,14 +510,14 @@ def run_context_stress_matrix(repetitions=5):
                     }
                 )
     ratios = [config["avg_prompt_compression_ratio"] for config in configs]
-    full_chars = [config["avg_full_prompt_chars"] for config in configs]
-    raw_chars = [config["avg_raw_prompt_chars"] for config in configs]
+    full_tokens = [config["avg_full_prompt_tokens"] for config in configs]
+    raw_tokens = [config["avg_raw_prompt_tokens"] for config in configs]
     return {
         "config_count": len(configs),
         "configs": configs,
         "summary": {
-            "avg_full_prompt_chars": _safe_mean(full_chars),
-            "avg_raw_prompt_chars": _safe_mean(raw_chars),
+            "avg_full_prompt_tokens": _safe_mean(full_tokens),
+            "avg_raw_prompt_tokens": _safe_mean(raw_tokens),
             "avg_prompt_compression_ratio": _safe_mean(ratios),
             "max_prompt_compression_ratio": max(ratios) if ratios else 0.0,
             "min_prompt_compression_ratio": min(ratios) if ratios else 0.0,
@@ -917,30 +917,30 @@ def run_real_context_experiment(provider="gpt", repetitions=1):
                             per_run.append(
                                 {
                                     "variant": variant_name,
-                                    "prompt_chars": int(agent.last_prompt_metadata.get("prompt_chars", 0)),
+                                    "prompt_tokens": int(agent.last_prompt_metadata.get("prompt_tokens", 0)),
                                     "correct": token.lower() in _normalize_text(answer),
                                 }
                             )
                 full_rows = [row for row in per_run if row["variant"] == "full"]
                 raw_rows = [row for row in per_run if row["variant"] == "no_context_reduction"]
-                avg_full = _safe_mean(row["prompt_chars"] for row in full_rows)
-                avg_raw = _safe_mean(row["prompt_chars"] for row in raw_rows)
+                avg_full = _safe_mean(row["prompt_tokens"] for row in full_rows)
+                avg_raw = _safe_mean(row["prompt_tokens"] for row in raw_rows)
                 configs.append(
                     {
                         "id": f"{history_label}-{note_label}-{request_label}",
                         "history_level": history_label,
                         "note_level": note_label,
                         "request_level": request_label,
-                        "avg_full_prompt_chars": avg_full,
-                        "avg_raw_prompt_chars": avg_raw,
+                        "avg_full_prompt_tokens": avg_full,
+                        "avg_raw_prompt_tokens": avg_raw,
                         "avg_prompt_compression_ratio": _safe_ratio(avg_raw - avg_full, avg_raw),
                         "full_correct_rate": _safe_ratio(sum(1 for row in full_rows if row["correct"]), len(full_rows)),
                         "raw_correct_rate": _safe_ratio(sum(1 for row in raw_rows if row["correct"]), len(raw_rows)),
                     }
                 )
     ratios = [config["avg_prompt_compression_ratio"] for config in configs]
-    full_chars = [config["avg_full_prompt_chars"] for config in configs]
-    raw_chars = [config["avg_raw_prompt_chars"] for config in configs]
+    full_tokens = [config["avg_full_prompt_tokens"] for config in configs]
+    raw_tokens = [config["avg_raw_prompt_tokens"] for config in configs]
     return {
         "provider": provider,
         "config_count": len(configs),
@@ -949,8 +949,8 @@ def run_real_context_experiment(provider="gpt", repetitions=1):
             "avg_prompt_compression_ratio": _safe_mean(ratios),
             "max_prompt_compression_ratio": max(ratios) if ratios else 0.0,
             "min_prompt_compression_ratio": min(ratios) if ratios else 0.0,
-            "avg_full_prompt_chars": _safe_mean(full_chars),
-            "avg_raw_prompt_chars": _safe_mean(raw_chars),
+            "avg_full_prompt_tokens": _safe_mean(full_tokens),
+            "avg_raw_prompt_tokens": _safe_mean(raw_tokens),
         },
     }
 
@@ -1233,8 +1233,8 @@ def collect_resume_metrics(
         context = run_real_context_experiment(provider=real_provider, repetitions=context_repetitions)
         security = run_real_security_experiment_suite(provider=real_provider, repetitions=security_repetitions)
         stress = {
-            "full": {"prompt_chars": int(round(context["summary"].get("avg_full_prompt_chars", 0.0)))},
-            "no_context_reduction": {"prompt_chars": int(round(context["summary"].get("avg_raw_prompt_chars", 0.0)))},
+            "full": {"prompt_tokens": int(round(context["summary"].get("avg_full_prompt_tokens", 0.0)))},
+            "no_context_reduction": {"prompt_tokens": int(round(context["summary"].get("avg_raw_prompt_tokens", 0.0)))},
         }
     else:
         stress = build_stress_agent_metrics()
@@ -1267,9 +1267,9 @@ def collect_resume_metrics(
             f"Observed prompt-cache telemetry with average cached tokens of {runs['avg_cached_tokens']:.1f} and cache-hit rate of {runs['cache_hit_rate']:.2%} when available.",
             (
                 f"In a real-model long-context experiment ({real_provider}), context reduction shrank average prompt size from "
-                f"{stress['no_context_reduction']['prompt_chars']} to {stress['full']['prompt_chars']} chars."
+                f"{stress['no_context_reduction']['prompt_tokens']} to {stress['full']['prompt_tokens']} tokens."
                 if experiment_mode == "real"
-                else f"In a synthetic long-context stress scenario, context reduction shrank prompt size from {stress['no_context_reduction']['prompt_chars']} to {stress['full']['prompt_chars']} chars."
+                else f"In a synthetic long-context stress scenario, context reduction shrank prompt size from {stress['no_context_reduction']['prompt_tokens']} to {stress['full']['prompt_tokens']} tokens."
             ),
             f"In the memory dependency experiment, repeated follow-up reads dropped from {memory['memory_off']['repeated_reads']} to {memory['memory_on']['repeated_reads']}.",
             f"In the large-scale memory experiment, repeated reads dropped from {memory_large['variants']['memory_off']['repeated_reads']} to {memory_large['variants']['memory_on']['repeated_reads']} across {memory_large['task_count']} tasks.",
@@ -1300,9 +1300,9 @@ def render_resume_metrics_markdown(metrics):
         f"- Average attempts per run: {runs['avg_attempts']:.2f}",
         f"- Cache hit rate: {runs['cache_hit_rate']:.2%}",
         (
-            f"- Real-model prompt chars (full vs no context reduction): {stress['full']['prompt_chars']} / {stress['no_context_reduction']['prompt_chars']}"
+            f"- Real-model prompt tokens (full vs no context reduction): {stress['full']['prompt_tokens']} / {stress['no_context_reduction']['prompt_tokens']}"
             if metrics.get("experiment_mode") == "real"
-            else f"- Synthetic prompt chars (full vs no context reduction): {stress['full']['prompt_chars']} / {stress['no_context_reduction']['prompt_chars']}"
+            else f"- Synthetic prompt tokens (full vs no context reduction): {stress['full']['prompt_tokens']} / {stress['no_context_reduction']['prompt_tokens']}"
         ),
         f"- Memory repeated reads (on vs off): {memory['memory_on']['repeated_reads']} / {memory['memory_off']['repeated_reads']}",
         f"- Large-scale memory tasks: {memory_large['task_count']}",
@@ -1356,9 +1356,9 @@ def render_large_scale_experiment_report(metrics):
         "",
         "## Context Governance",
         (
-            f"- Real-model prompt chars ({report_provider}): {metrics['stress_ablation']['full']['prompt_chars']} vs {metrics['stress_ablation']['no_context_reduction']['prompt_chars']}"
+            f"- Real-model prompt tokens ({report_provider}): {metrics['stress_ablation']['full']['prompt_tokens']} vs {metrics['stress_ablation']['no_context_reduction']['prompt_tokens']}"
             if metrics.get("experiment_mode") == "real"
-            else f"- Synthetic stress prompt chars: {metrics['stress_ablation']['full']['prompt_chars']} vs {metrics['stress_ablation']['no_context_reduction']['prompt_chars']}"
+            else f"- Synthetic stress prompt tokens: {metrics['stress_ablation']['full']['prompt_tokens']} vs {metrics['stress_ablation']['no_context_reduction']['prompt_tokens']}"
         ),
         f"- Average prompt compression ratio across context matrix: {context['summary']['avg_prompt_compression_ratio']:.2%}",
         f"- Max prompt compression ratio across context matrix: {context['summary']['max_prompt_compression_ratio']:.2%}",
@@ -1400,7 +1400,7 @@ def render_large_scale_experiment_report(metrics):
         [
             "",
             "## Resume-Safe Claims",
-            f"- Long-context stress scenario: prompt length reduced from {metrics['stress_ablation']['no_context_reduction']['prompt_chars']} to {metrics['stress_ablation']['full']['prompt_chars']}.",
+            f"- Long-context stress scenario: prompt length reduced from {metrics['stress_ablation']['no_context_reduction']['prompt_tokens']} to {metrics['stress_ablation']['full']['prompt_tokens']}.",
             f"- Large-scale memory experiment: repeated reads reduced from {memory_large['variants']['memory_off']['repeated_reads']} to {memory_large['variants']['memory_on']['repeated_reads']}.",
             f"- Platform facts: {benchmark['task_count']} benchmark tasks, {metrics['facts']['tool_count']} tool types, {metrics['facts']['run_artifact_count']} run artifacts.",
             "",
@@ -1792,8 +1792,8 @@ def write_benchmark_core_report(
         "",
         "## Context Ablation",
         f"- 配置数：{context['config_count']}",
-        f"- avg_full_prompt_chars：{context['summary']['avg_full_prompt_chars']:.2f}",
-        f"- avg_raw_prompt_chars：{context['summary']['avg_raw_prompt_chars']:.2f}",
+        f"- avg_full_prompt_tokens：{context['summary']['avg_full_prompt_tokens']:.2f}",
+        f"- avg_raw_prompt_tokens：{context['summary']['avg_raw_prompt_tokens']:.2f}",
         f"- avg_prompt_compression_ratio：{context['summary']['avg_prompt_compression_ratio']:.2%}",
         f"- max_prompt_compression_ratio：{context['summary']['max_prompt_compression_ratio']:.2%}",
         f"- current_request_preserved_rate：{context['summary']['current_request_preserved_rate']:.2%}",
@@ -1812,8 +1812,8 @@ def write_benchmark_core_report(
         f"- resume_false_accept_rate：{enabled_recovery['resume_false_accept_rate']:.2%}",
         "",
         "## 可以安全写进简历的指标",
-        "- avg_full_prompt_chars",
-        "- avg_raw_prompt_chars",
+        "- avg_full_prompt_tokens",
+        "- avg_raw_prompt_tokens",
         "- avg_prompt_compression_ratio",
         "- max_prompt_compression_ratio",
         "- repeated_reads",

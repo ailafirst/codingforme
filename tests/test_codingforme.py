@@ -12,6 +12,7 @@ import pytest
 from litellm.types.utils import ModelResponse
 
 import codingforme as mini_pkg
+from codingforme import models as models_module
 from codingforme import (
     FakeModelClient,
     CodingForMe,
@@ -305,9 +306,11 @@ def test_agent_saves_and_resumes_session(tmp_path):
 
 
 def test_delegate_uses_child_agent(tmp_path):
+    # delegate 现在是有名字的变体（`delegate_tool`，默认关，见 tools.build_tool_registry）。
     agent = build_agent(
         tmp_path,
-        [
+        feature_flags={"delegate_tool": True},
+        outputs=[
             tool_call("delegate", task="inspect README", max_steps=2),
             final_answer("Child result."),
             final_answer("Parent incorporated the child result."),
@@ -1703,7 +1706,9 @@ def test_prompt_budget_metadata_records_budget_decisions(tmp_path):
     assert "beta episodic" in relevant_section
     assert "gamma episodic" in relevant_section
     assert metadata["current_request"]["text"] == "recall"
-    assert metadata["current_request"]["rendered_chars"] == len("recall")
+    from codingforme.models import count_tokens
+
+    assert metadata["current_request"]["rendered_tokens"] == count_tokens("recall")
 
 
 def test_prompt_metadata_refreshes_prefix_when_workspace_changes(tmp_path):
@@ -2319,14 +2324,18 @@ def test_agent_records_model_cache_metadata_in_last_prompt_metadata(tmp_path):
 
 def test_recent_transcript_entries_stay_richer_than_older_ones(tmp_path):
     agent = build_agent(tmp_path, [final_answer("Done.")])
-    old_text = "OLD-" + ("A" * 320)
-    recent_text = "RECENT-" + ("B" * 320)
+    # 用互不相同的词而不是重复字符：预算按 token 判之后，"A"*320 只值个位数 token，
+    # 较早那段根本撑不到需要压缩，用例会静默失去意义。
+    old_text = "OLD- " + " ".join(f"oldword{n}" for n in range(60))
+    recent_text = "RECENT- " + " ".join(f"newword{n}" for n in range(60))
 
-    # 2 条旧的 + 12 条新的。12 是最近窗口的条目上限（6 个工具轮 × 每轮最多
-    # 2 条记录：模型说明 + 工具结果），要让前两条落到「较早」那一段就得垫满。
+    # 2 条旧的 + 18 条新的。12 是最近窗口的条目上限（6 个工具轮 × 每轮最多 2 条
+    # 记录：模型说明 + 工具结果），而这条上限本身按 2 * RECENT_WINDOW_BLOCK = 6 条
+    # 成块推进，实际窗口在 12~17 之间浮动，所以要垫到 18 才能让前两条稳定落到
+    # 「较早」那一段。
     agent.record({"role": "user", "content": old_text, "created_at": "2026-04-07T09:00:00+00:00"})
     agent.record({"role": "assistant", "content": old_text, "created_at": "2026-04-07T09:01:00+00:00"})
-    for minute in range(2, 14):
+    for minute in range(2, 20):
         role = "user" if minute % 2 == 0 else "assistant"
         agent.record(
             {
@@ -2531,7 +2540,7 @@ def test_delegate_step_budget_is_bounded(tmp_path):
 
     schema 声明了约束却不执行，比不声明更糟：模型据此以为 max_steps=999 合法。
     """
-    agent = build_agent(tmp_path, [])
+    agent = build_agent(tmp_path, [], feature_flags={"delegate_tool": True})
 
     result = agent.run_tool("delegate", {"task": "look around", "max_steps": 999})
 
@@ -2856,3 +2865,264 @@ def test_a_registry_with_no_write_tools_drops_the_rule_instead_of_emptying_it(tm
     assert "instead of repeatedly listing files" not in agent.prefix
     assert "Do not call read_file with args={}." in agent.prefix
     assert "__WRITE_RULE__" not in agent.prefix and "__REQUIRED_ARGS_RULE__" not in agent.prefix
+
+
+def test_the_context_window_is_resolved_through_four_layers_in_order():
+    """窗口大小的来源要分得清：人定的 / 已知后端表 / litellm 注册表 / 回落默认值。
+
+    只记一个预算值是不够的——预算随环境变化（换 provider、litellm 升级映射表）
+    会让两次跑批不可比，而工件上看不出它是哪来的。
+    """
+    from codingforme import models
+
+    assert models.resolve_context_window("mimo-v2.5", explicit=32_000) == (32_000, "explicit")
+    assert models.resolve_context_window("mimo-v2.5") == (1_000_000, "known-model")
+    assert models.resolve_context_window("gpt-4o") == (128_000, "litellm-registry")
+    window, source = models.resolve_context_window("no-such-model-anywhere")
+    assert (window, source) == (models.DEFAULT_WINDOW_TOKENS, "default")
+
+
+def test_a_detected_window_is_floored_to_a_bucket_before_it_becomes_a_budget():
+    """探测值要向下取整到档位再用，不直接当预算。
+
+    档位让 total_budget 成为一个可声明、可复现的值：直接用探测值的话，换个
+    provider 或 litellm 升级一次映射表，HarnessSpec 指纹就跟着变，「两次跑批
+    能不能放一起比」这条保证就没了。向下取整而不是四舍五入，是因为猜大了会撞
+    后端 400、丢掉整轮已经做完的工具执行。
+    """
+    from codingforme import models
+
+    assert models.bucket_window(200_000) == 128_000
+    assert models.bucket_window(128_000) == 128_000
+    assert models.bucket_window(100) == models.WINDOW_BUCKETS[0]
+    # 百万窗口也不会让预算开到百万：上下文腐坏和计费都在那之前就先到了。
+    budget = models.context_budget_tokens(1_000_000, tool_schema_tokens=0, output_reserve_tokens=0)
+    assert budget < models.EFFECTIVE_WINDOW_CAP_TOKENS
+    assert budget > models.EFFECTIVE_WINDOW_CAP_TOKENS * 0.9
+
+
+def test_the_budget_deducts_message_framing_as_an_absolute_amount_not_a_ratio():
+    """结构开销按**消息条数**扣，不按 prompt 长度扣。
+
+    实测（`scripts/measure_token_accounting.py`，mimo-v2.5，23 轮真实请求）：
+    `residual = input_tokens − prompt_tokens − schema` 对消息条数回归 R²=0.838，
+    对 prompt 长度回归只有 0.396。原先那个乘在窗口上的 0.8 系数方向就是错的——
+    它在 128k 档一次扣掉 25,600 个 token 去覆盖一笔实测约 1,200 的开销。
+
+    这条锁住形状：步数上限翻倍时扣除额随之增加，而窗口翻倍时**每条消息的**
+    扣除额不变。
+    """
+    from codingforme import models
+
+    few = models.budget_breakdown(128_000, expected_messages=5)
+    many = models.budget_breakdown(128_000, expected_messages=45)
+
+    per_message = models.MESSAGE_FRAMING_TOKENS_PER_MESSAGE
+    assert many["message_framing_tokens"] - few["message_framing_tokens"] == 40 * per_message
+    # 窗口变大不改变结构开销：它跟着条数走，不跟着窗口走。
+    assert models.budget_breakdown(64_000, expected_messages=45)["message_framing_tokens"] == (
+        many["message_framing_tokens"]
+    )
+    # 消息条数由步数上限推出来，`5 + 2 × steps`（实测 25 次调用时是 54 条）。
+    assert models.expected_message_count(25) == 55
+
+
+def test_a_window_too_small_to_hold_the_deductions_says_so_instead_of_pretending():
+    """扣完四笔仍然不够时要把 `floored` 标出来，不能静默返回下限。
+
+    静默的话调用方会以为「还有 1000 个 token 可用」，而实际上这个窗口配置根本
+    装不下 schema + 输出预留，该做的是换档位或调小 max_new_tokens。
+    """
+    from codingforme import models
+
+    tight = models.budget_breakdown(8_000, tool_schema_tokens=6_000, output_reserve_tokens=4_000)
+
+    assert tight["floored"] is True
+    assert tight["budget_tokens"] == models.BUDGET_FLOOR_TOKENS
+    assert models.budget_breakdown(128_000, tool_schema_tokens=1_300)["floored"] is False
+
+
+def test_window_sizes_parse_from_the_three_shapes_people_actually_type():
+    """`128k` / `1m` / `128000` 是同一个解析器的三种写法。
+
+    只有一个解析器（`models.parse_window_tokens`），CLI 参数、环境变量、REPL 的
+    `/context` 共用它——多一处写法就多一处「同一个数在两个入口下含义不同」。
+    """
+    from codingforme.models import parse_window_tokens
+
+    assert parse_window_tokens("128000") == 128_000
+    assert parse_window_tokens("128k") == 128_000
+    assert parse_window_tokens("128K") == 128_000
+    assert parse_window_tokens("1m") == 1_000_000
+    assert parse_window_tokens("128_000") == 128_000
+    assert parse_window_tokens(" 256k ") == 256_000
+
+    # 解析不出来必须抛，不能静默回落到默认档——那会让人以为设生效了。
+    for bad in ("", "abc", "128g", "-5", "0"):
+        with pytest.raises(ValueError):
+            parse_window_tokens(bad)
+
+
+def test_changing_the_context_window_mid_session_keeps_history_and_rederives_the_budget(tmp_path):
+    """`/context` 要能在对话中途改档位，所以 `set_context_window()` 必须可重入。
+
+    两件事一起验：预算跟着窗口重新派生（不是只改了个显示用的数），以及 history
+    和 memory 一个字都没动——重建 ContextManager 时顺手清掉对话，是这类「运行中
+    换配置」最容易出的 bug。
+    """
+    agent = build_agent(tmp_path, [tool_call("read_file", path="README.md"), final_answer("done")])
+    agent.ask("read the readme")
+    history_before = json.dumps(agent.session["history"], sort_keys=True)
+    memory_before = json.dumps(agent.session["memory"], sort_keys=True)
+
+    window, source, budget = agent.set_context_window(32_000)
+
+    assert window == 32_000
+    assert source == "explicit"
+    assert agent.context_budget == budget
+    assert agent.context_manager.total_budget == budget
+    # 32k 档扣完四笔仍然必须比 1M 档（夹到 128k）小得多。
+    assert budget < models_module.context_budget_tokens(1_000_000)
+    assert json.dumps(agent.session["history"], sort_keys=True) == history_before
+    assert json.dumps(agent.session["memory"], sort_keys=True) == memory_before
+
+
+def test_context_command_reports_the_tier_its_source_and_what_the_budget_is_made_of(tmp_path):
+    """不带参数的 `/context` 要能独立读懂：档位、来源、预算、以及可填的档位清单。
+
+    「来源」这一项不能省：`explicit` 和 `default` 的区别就是「这是我设的」还是
+    「自动猜的没猜准」，少了它，一个 8k 的显示无从判断该不该动手改。
+    """
+    from codingforme.cli import _context_status
+
+    agent = build_agent(tmp_path, [])
+    agent.set_context_window(128_000)
+    text = _context_status(agent)
+
+    assert "128k" in text
+    assert "explicit" in text
+    assert str(f"{agent.context_budget:,}") in text
+    assert "1M" in text          # 档位清单列出来，不用去翻源码
+    assert "/context 128k" in text
+    # 算式要逐项列出来：只给一个总数的话，不知道该去调哪一笔。
+    for label in ("output", "schema", "frames", "margin"):
+        assert label in text, f"/context 少了 {label} 这一项扣除"
+    assert str(f"{agent.context_budget_breakdown['tool_schema_tokens']:,}") in text
+
+
+def test_context_command_says_when_it_floored_your_number_to_a_tier(tmp_path):
+    """填 100k 会落到 64k 档。不说出来的话，用户会以为设成了 100k。"""
+    from codingforme.cli import _apply_context_window
+
+    agent = build_agent(tmp_path, [])
+    text = _apply_context_window(agent, "100k")
+
+    assert agent.context_window == 64_000
+    assert "64k" in text
+    assert "floored" in text
+
+
+def test_a_bad_context_command_argument_changes_nothing(tmp_path):
+    """解析失败只回一句错误，档位和预算原封不动——静默回落是这里最坏的行为。"""
+    from codingforme.cli import _apply_context_window
+
+    agent = build_agent(tmp_path, [])
+    agent.set_context_window(128_000)
+    before = (agent.context_window, agent.context_budget, agent.context_manager.total_budget)
+
+    text = _apply_context_window(agent, "banana")
+
+    assert "not a context window size" in text
+    assert (agent.context_window, agent.context_budget, agent.context_manager.total_budget) == before
+
+
+def test_an_empty_old_text_appends_instead_of_erroring(tmp_path):
+    """`patch_file(old_text="")` 是追加，不是报错。
+
+    加这条用法是实测逼出来的：一次 k=3 的 live 跑批里，模型想往 notes.md 末尾加一行，
+    3 次有 2 次自发发出这个形状，每次都换回一句 `old_text must not be empty`——白烧
+    一步加一个约 17 秒的往返，`arguments_valid` 只剩 1/3。
+    """
+    agent = build_agent(tmp_path, [])
+    (tmp_path / "notes.md").write_text("# notes\n", encoding="utf-8")
+
+    result = agent.run_tool(
+        "patch_file", {"path": "notes.md", "old_text": "", "new_text": "audit token: abc\n"}
+    )
+
+    assert not result.startswith("error:")
+    assert "appended to notes.md" in result
+    assert (tmp_path / "notes.md").read_text(encoding="utf-8") == "# notes\naudit token: abc\n"
+
+
+def test_appending_to_a_file_without_a_trailing_newline_does_not_glue_the_lines_together(tmp_path):
+    """补一个换行、只补一个：接什么就是什么，结果能从参数直接推出来。"""
+    agent = build_agent(tmp_path, [])
+    (tmp_path / "notes.md").write_text("# notes", encoding="utf-8")
+
+    agent.run_tool("patch_file", {"path": "notes.md", "old_text": "", "new_text": "tail"})
+
+    assert (tmp_path / "notes.md").read_text(encoding="utf-8") == "# notes\ntail"
+
+
+def test_appending_still_requires_new_text(tmp_path):
+    """空 old_text 换掉的是「精确命中一次」，不是参数校验本身。"""
+    agent = build_agent(tmp_path, [])
+    (tmp_path / "notes.md").write_text("# notes\n", encoding="utf-8")
+
+    result = agent.run_tool("patch_file", {"path": "notes.md", "old_text": ""})
+
+    assert result.startswith("error:")
+    assert "missing new_text" in result
+
+
+def test_a_non_empty_old_text_still_has_to_match_exactly_once(tmp_path):
+    """反向用例：追加模式不能把确定性替换那条约束一起放宽。"""
+    agent = build_agent(tmp_path, [])
+    (tmp_path / "notes.md").write_text("dup\ndup\n", encoding="utf-8")
+
+    result = agent.run_tool(
+        "patch_file", {"path": "notes.md", "old_text": "dup", "new_text": "one"}
+    )
+
+    assert result.startswith("error:")
+    assert (tmp_path / "notes.md").read_text(encoding="utf-8") == "dup\ndup\n"
+
+
+def test_the_schema_tells_the_model_that_an_empty_old_text_appends(tmp_path):
+    """模型只能从 schema 描述知道这条用法——它不在任何示例里。"""
+    from codingforme import tools as toolkit
+
+    specs = toolkit.to_openai_function_specs({"patch_file": toolkit.BASE_TOOL_SPECS["patch_file"]})
+    description = specs[0]["function"]["parameters"]["properties"]["old_text"]["description"]
+
+    assert "append" in description
+
+
+def test_the_prompt_metadata_reports_only_token_units(tmp_path):
+    """工件里不能再出现按字符计的段落尺寸。
+
+    单位统一到 token 之后，`prefix_chars` / `history_chars` 这类字段没有任何代码再
+    读，但它们仍然每轮落进 trace——留着的后果不是浪费几个字节，是读工件的人会把
+    它们当成预算的口径，而预算、各段下限、工具输出上限、截断原语全都按 token 算。
+    段落尺寸的唯一口径是 `sections[*].rendered_tokens` / `budget_tokens`。
+    """
+    agent = build_agent(tmp_path, [])
+    _, _, metadata = agent._build_context("hello")
+
+    char_fields = sorted(key for key in metadata if key.endswith("_chars"))
+
+    assert char_fields == []
+    assert metadata["sections"]["prefix"]["rendered_tokens"] > 0
+
+
+def test_compact_is_discoverable_from_help_and_the_welcome_hint():
+    """新加的斜杠命令必须在 `/help` 和欢迎语里都出现。
+
+    只实现不挂出去等于没有：REPL 里没人会去猜一个没列出来的命令，而这个命令
+    恰恰是「用户知道这一段结束了」时才该敲的——它的全部价值依赖用户知道它存在。
+    """
+    from codingforme.cli import HELP_DETAILS, WELCOME_HINT
+
+    assert "/compact" in HELP_DETAILS
+    assert "/compact" in WELCOME_HINT

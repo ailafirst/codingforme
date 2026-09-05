@@ -43,10 +43,16 @@ def task_by_id(benchmark, task_id):
 
 
 def test_session_benchmark_covers_the_four_question_types():
+    """四种 LongMemEval 题型必须齐全；压力探针是另一类，不占它们的名额。
+
+    `context_pressure` 不是记忆题型——它测的是「上下文压力有没有被压下去」，
+    加进 QUESTION_TYPES 会让「四种题型齐不齐」这个契约变松。所以这里查的是
+    **包含**四种，而不是恰好等于四种；「每个任务都得有断言」那条对所有任务照旧。
+    """
     benchmark = load_session_benchmark(DEFAULT_SESSION_BENCHMARK_PATH)
 
     assert benchmark["schema_version"] == 1
-    assert {task["question_type"] for task in benchmark["tasks"]} == QUESTION_TYPES
+    assert QUESTION_TYPES <= {task["question_type"] for task in benchmark["tasks"]}
     for task in benchmark["tasks"]:
         assert len(task["turns"]) >= 2, "跨会话任务至少要两轮，否则测的还是单轮"
         assert any(turn.get("expect") for turn in task["turns"]), f"{task['id']} 没有任何断言"
@@ -89,7 +95,7 @@ def test_full_harness_passes_every_session_assertion(tmp_path):
     result = run_session_suite(workspace_root=tmp_path / "ws")
 
     assert failures(result) == {}
-    assert result["aggregates"]["total"] == 12
+    assert result["aggregates"]["total"] == 14
     assert all(case["level"] == LEVEL_SESSION for case in result["cases"])
     assert len({case["case_id"] for case in result["cases"]}) == len(result["cases"])
 
@@ -99,9 +105,10 @@ def test_the_suite_actually_produces_multi_run_sessions(tmp_path):
     result = run_session_suite(workspace_root=tmp_path / "ws")
 
     coverage = result["trace"]["coverage"]
-    assert coverage["multi_run_sessions"] == 4
-    assert coverage["session_count"] == 4
-    assert coverage["run_count"] == 13
+    assert coverage["multi_run_sessions"] == 5
+    assert coverage["session_count"] == 5
+    # 13 = 四条记忆会话的轮次和；+24 = `long_dialogue_pressure` 那条压力探针
+    assert coverage["run_count"] == 37
     assert coverage["synthetic_sessions"] == 0
 
 
@@ -233,3 +240,25 @@ def test_session_cases_are_stable_across_recomputation(tmp_path):
 def test_benchmark_path_default_points_at_the_repo_dataset():
     assert Path(DEFAULT_SESSION_BENCHMARK_PATH).name == "session_tasks.json"
     assert load_session_benchmark(DEFAULT_SESSION_BENCHMARK_PATH)["tasks"]
+
+
+def test_the_pressure_probe_can_fail_when_nothing_is_compressed(tmp_path):
+    """证伪：把窗口放大到压力够不着，这条断言必须挂。
+
+    没有这条，`context_pressure_absorbed` 通过只说明它什么都没查——而这正是这套
+    上下文工程踩过两轮的坑：机制「实现了、有测试、真实跑批里一次都不执行」，
+    在报告里长得和「没问题」一模一样。
+    """
+    tight = run_session_suite(workspace_root=tmp_path / "tight")
+    loose = run_session_suite(harness=get_harness("window_32k"), workspace_root=tmp_path / "loose")
+
+    def pressure_case(result):
+        return next(
+            case for case in result["cases"]
+            if case["detail"].get("assertion_id") == "context_pressure_absorbed"
+        )
+
+    assert pressure_case(tight)["passed"] is True
+    loose_case = pressure_case(loose)
+    assert loose_case["passed"] is False
+    assert loose_case["detail"]["reduced_turns"] == 0

@@ -32,6 +32,7 @@ from codingforme.eval.scorers import (
 )
 from codingforme.eval.tool_usage import (
     EMPTY_PLAN_USAGE,
+    EMPTY_SPILL_USAGE,
     render_tool_usage_markdown,
     summarize_tool_usage,
 )
@@ -709,6 +710,87 @@ def test_a_run_that_never_planned_reports_zeros_rather_than_omitting_the_block(t
     assert "一次都没用过" in render_tool_usage_markdown(usage)
 
 
+def test_a_run_that_never_spilled_says_so_instead_of_omitting_the_block(tmp_path):
+    """阶段三 L1 的零值同样要写出来。
+
+    省略这一节会被读成「这块没问题」，而实际含义是「这批负载里没有一次工具输出
+    大到需要落盘」——那是关于负载的结论，不是关于机制的结论，两者的下一步不同。
+    """
+    build_workspace(tmp_path)
+    agent = build_agent(tmp_path, [tool_call("read_file", path="README.md"), final_answer("done")])
+    agent.ask("read it")
+
+    usage = summarize_tool_usage(index_for(agent, tmp_path))
+
+    assert usage["spill"] == EMPTY_SPILL_USAGE
+    assert "一次都没触发" in render_tool_usage_markdown(usage)
+
+
+def test_a_spilled_tool_result_shows_up_in_the_batch_summary(tmp_path):
+    """落盘触发过的话，报告里要能看见触发了几次、少进了多少 token。
+
+    没有这几个数就没有验收通道：机制天天生效和从来没跑过在报告里长得一模一样。
+    """
+    build_workspace(tmp_path)
+    body = "\n".join(f"line {index} alpha beta gamma delta epsilon" for index in range(4000))
+    (tmp_path / "big.txt").write_text(body, encoding="utf-8")
+    agent = build_agent(
+        tmp_path,
+        [tool_call("read_file", path="big.txt", start=1, end=4000), final_answer("done")],
+    )
+    agent.ask("read the big one")
+
+    spill = summarize_tool_usage(index_for(agent, tmp_path))["spill"]
+
+    assert spill["spilled_calls"] == 1
+    assert spill["by_tool"] == {"read_file": 1}
+    assert spill["runs_with_spill"] == 1
+    assert spill["saved_tokens"] == spill["full_tokens"] - spill["kept_tokens"] > 0
+    assert "少进" in render_tool_usage_markdown(summarize_tool_usage(index_for(agent, tmp_path)))
+    # 成功那批也要明说失败 0 次——不写的话，读者无从知道这个故障通道被查过。
+    assert spill["failed_calls"] == 0
+    assert "落盘失败 0 次" in render_tool_usage_markdown(summarize_tool_usage(index_for(agent, tmp_path)))
+
+
+def test_a_failed_spill_is_counted_and_reported_separately_from_a_successful_one(tmp_path, monkeypatch):
+    """落盘失败要单独计数、单独渲染，不能混进用量里。
+
+    混在一起的话，「模型读了个大文件、机制正常接住了」和「机制该接却接漏了、
+    模型手里那份结果被静默截断」在报告里就是同一个数。后者是故障:落盘文件不存在、
+    指针也没有，那份内容对模型来说彻底没了。
+    """
+    build_workspace(tmp_path)
+    body = "\n".join(f"line {index} alpha beta gamma delta epsilon" for index in range(4000))
+    (tmp_path / "big.txt").write_text(body, encoding="utf-8")
+    agent = build_agent(
+        tmp_path,
+        [tool_call("read_file", path="big.txt", start=1, end=4000), final_answer("done")],
+    )
+    monkeypatch.setattr(
+        type(agent),
+        "_spill_dir",
+        lambda self: (_ for _ in ()).throw(OSError("read-only filesystem")),
+    )
+    agent.ask("read the big one")
+
+    summary = summarize_tool_usage(index_for(agent, tmp_path))
+    spill = summary["spill"]
+
+    # 失败不算成功用量。
+    assert spill["spilled_calls"] == 0
+    assert spill["by_tool"] == {}
+    # 但它必须被数到、带上原始大小和原因。
+    assert spill["failed_calls"] == 1
+    assert spill["failed_tokens"] > 0
+    assert spill["failures"][0]["name"] == "read_file"
+    assert "read-only filesystem" in spill["failures"][0]["error"]
+
+    markdown = render_tool_usage_markdown(summary)
+    assert "落盘失败 1 次" in markdown
+    # 「一次都没触发」那句是关于负载的结论，不能拿来盖住一次故障。
+    assert "不可恢复" in markdown
+
+
 def test_a_rejected_plan_counts_as_attempted_but_not_executed(tmp_path):
     """写错的计划照样烧掉一个模型往返，所以「写了几段」和「跑起来几段」要分开数。
 
@@ -735,13 +817,13 @@ def test_a_rejected_plan_counts_as_attempted_but_not_executed(tmp_path):
     assert plan["plans_attempted"] == 2
     assert plan["plans_executed"] == 1
     assert plan["plans_rejected"] == 1
-    # 被打回的那段一个工具都没执行，所以它不该给 saved_chars 贡献任何东西。
+    # 被打回的那段一个工具都没执行，所以它不该给 saved_tokens 贡献任何东西。
     assert plan["inner_calls"] == 1
     assert "打回率 50%" in render_tool_usage_markdown(summarize_tool_usage(index_for(agent, tmp_path)))
 
 
 def test_tool_usage_records_how_much_context_the_plan_kept_out(tmp_path):
-    """`saved_chars` 是加这个模块的核心：没有它，「真省了」和「什么都没省」分不出来。"""
+    """`saved_tokens` 是加这个模块的核心：没有它，「真省了」和「什么都没省」分不出来。"""
     build_workspace(tmp_path)
     (tmp_path / "big.py").write_text("noise line\n" * 300, encoding="utf-8")
     harness = get_harness("plan_tool")
@@ -764,6 +846,6 @@ def test_tool_usage_records_how_much_context_the_plan_kept_out(tmp_path):
     # 内层调用照样进 by_tool——它确实执行了、计了一步、过了闸口。
     assert usage["by_tool"]["read_file"]["calls"] == 1
     assert plan["filtered_plans"] == 1
-    assert plan["result_bytes"] > plan["transcript_chars"]
-    assert plan["saved_chars"] == plan["result_bytes"] - plan["transcript_chars"]
-    assert plan["saved_chars"] > 0
+    assert plan["result_bytes"] > plan["transcript_tokens"]
+    assert plan["saved_tokens"] == plan["result_bytes"] - plan["transcript_tokens"]
+    assert plan["saved_tokens"] > 0

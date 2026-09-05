@@ -13,6 +13,7 @@ from functools import partial
 from pathlib import Path
 
 from . import plans
+from .task_state import STOP_REASON_FINAL_ANSWER_RETURNED
 from .workspace import IGNORED_PATH_NAMES, clip
 
 # 路径类参数共用的一句话说明。
@@ -137,7 +138,9 @@ BASE_TOOL_SPECS = {
                 "description": (
                     "The text to replace, copied from the file byte for byte, including "
                     "indentation and line breaks. It must occur exactly once, so include "
-                    "enough surrounding lines to make it unique. Read the file first."
+                    "enough surrounding lines to make it unique. Read the file first. "
+                    'Pass "" to append new_text to the end of the file instead of replacing '
+                    "anything; a line break is inserted first if the file does not end with one."
                 ),
             },
             "new_text": {
@@ -146,7 +149,10 @@ BASE_TOOL_SPECS = {
             },
         },
         "risky": True,
-        "description": "Replace one exact block of text in an existing file.",
+        "description": (
+            "Replace one exact block of text in an existing file, or append to the end of it "
+            'when old_text is "".'
+        ),
     },
 }
 
@@ -155,13 +161,21 @@ DELEGATE_TOOL_SPEC = {
         "task": {"type": "str", "description": "What the child agent should find out, in one sentence."},
         "max_steps": {
             "type": "int=3",
-            "description": "How many tool calls the child agent may make.",
+            "description": (
+                "How many tool calls the child agent may make. It is a hard cap, not a hint: "
+                "the child is cut off mid-investigation when it runs out and returns a partial "
+                "answer marked 'incomplete'. Budget one call per file it will have to open."
+            ),
             "minimum": 1,
             "maximum": 8,
         },
     },
     "risky": False,
-    "description": "Ask a bounded read-only child agent to investigate something and report back.",
+    "description": (
+        "Ask a bounded read-only child agent to investigate something and report back. "
+        "Its transcript stays out of this conversation; only its final answer comes back, "
+        "so use it for questions whose answer is short but whose investigation is long."
+    ),
 }
 
 # 受限编排工具。**默认不注册**：由 feature flag `plan_tool` 打开（见
@@ -250,7 +264,11 @@ def build_tool_registry(agent):
     }
     # 子 agent 是刻意做成受限能力的：一旦深度耗尽，
     # 就连 delegate 这个工具都不再暴露给模型。
-    if agent.depth < agent.max_depth:
+    #
+    # 开关默认**关**，理由和 run_plan 一样：它会改变模型的行为，开着跑出来的数据
+    # 和关着跑出来的不可比。CLI 那边在 `build_agent()` 里显式打开，所以交互式用法
+    # 不受影响；评测里要用就走 `delegate_tool` 这个有名字的变体。
+    if agent.depth < agent.max_depth and agent.feature_enabled("delegate_tool"):
         tools["delegate"] = {**DELEGATE_TOOL_SPEC, "run": partial(tool_delegate, agent)}
     # 受限编排默认关闭。开着它跑出来的数据和关着它跑出来的不可比，所以让它
     # 成为一个有名字的变体（`HarnessSpec(feature_flags={"plan_tool": True})`），
@@ -613,7 +631,7 @@ def wrong_kind_error(agent, path, expected):
 # 只是让几个调用能在一次模型往返里发完。把它计进白名单的话，数据集里每一个任务
 # 都要重新声明一个不给任何权限的名字，否则这个变体在整份基准上直接变成空操作——
 # 而"变体开了但什么都没发生"在报告里长得和"变体没用"一模一样。
-META_TOOLS = frozenset({"run_plan"})
+META_TOOLS = frozenset({"run_plan", "delegate"})
 
 
 def plan_callable_tools(agent):
@@ -688,10 +706,14 @@ def validate_tool(agent, name, args):
         if not path.is_file():
             raise wrong_kind_error(agent, path, "file")
         old_text = str(args.get("old_text", ""))
-        if not old_text:
-            raise ValueError("old_text must not be empty")
         if "new_text" not in args:
             raise ValueError("missing new_text")
+        # old_text 为空 = 追加到文件末尾。这不是放宽「精确命中一次」那条约束，是另一种
+        # 模式：空串在任何文件里都出现无数次，它本来就永远不可能是一次合法的替换。
+        # 加它是因为实测模型想追加一行时**自发**就发这个形状（一次 k=3 的 live 跑批里
+        # 3 次有 2 次），而它从前只换回一句报错，白烧一步加一个约 17 秒的往返。
+        if not old_text:
+            return
         text = path.read_text(encoding="utf-8")
         count = text.count(old_text)
         if count != 1:
@@ -795,6 +817,21 @@ def tool_list_files(agent, args):
     return "\n".join(lines) or "(empty)"
 
 
+def _is_spill_path(agent, path):
+    """这个路径是不是超长工具结果的落盘件。
+
+    走 agent 上的 `spill_root()` 而不是在这里拼字符串：落盘目录必须在 workspace
+    root 之下（否则 `path()` 会把模型挡在门外），这条约束只有 runtime 知道。
+    """
+    root = getattr(agent, "spill_root", None)
+    if root is None:
+        return False
+    try:
+        return Path(path).resolve().is_relative_to(Path(root()).resolve())
+    except (OSError, ValueError, TypeError):
+        return False
+
+
 def tool_read_file(agent, args):
     path = agent.path(args["path"])
     if not path.is_file():
@@ -804,8 +841,19 @@ def tool_read_file(agent, args):
     if start < 1 or end < start:
         raise ValueError("invalid line range")
     lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    body = "\n".join(f"{number:>4}: {line}" for number, line in enumerate(lines[start - 1:end], start=start))
-    return f"# {path.relative_to(agent.root)}\n{body}"
+    window = lines[start - 1:end]
+    # 落盘件按原样回，不再编号。两个理由，第二个是硬的：
+    # 一、它存的就是上一次工具结果的逐字节副本，而 `read_file` 的结果本来就带行号，
+    #    再编一次会得到 `198: 198:2026-08-30T...`（live 实测）；
+    # 二、指针里那个「一段读多少行」是按**落盘时**的每行 token 数算出来的，再加一层
+    #    行号会把每行撑大，建议值当场失真，取回又会撞上单条上限、再落一次盘。
+    if _is_spill_path(agent, path):
+        return "\n".join(window)
+    body = "\n".join(f"{number:>4}: {line}" for number, line in enumerate(window, start=start))
+    # 路径一律正斜杠：这串东西会被模型原样喂回 read_file（超长结果落盘之后的
+    # 指针就是这么用的），而 `relative_to()` 在 Windows 上给反斜杠——同一段
+    # 上下文在两个平台上形状不同是最难查的一类问题。
+    return f"# {path.relative_to(agent.root).as_posix()}\n{body}"
 
 
 def tool_search(agent, args):
@@ -888,7 +936,7 @@ def tool_write_file(agent, args):
     content = str(args["content"])
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
-    return f"wrote {path.relative_to(agent.root)} ({len(content)} chars)"
+    return f"wrote {path.relative_to(agent.root).as_posix()} ({len(content)} chars)"
 
 
 PATCH_EXCERPT_CONTEXT_LINES = 2
@@ -922,16 +970,29 @@ def _patched_excerpt(updated_text, start_offset, new_text):
     return body
 
 
+def _append_to_file(agent, path, text, new_text):
+    """把 new_text 接到文件末尾，回显格式和替换分支保持一致。
+
+    只补一个换行、不补第二个：接什么就是什么，模型自己带没带结尾换行由它决定。
+    这样「追加」的结果可以从参数直接推出来，不需要再回读一次文件确认。
+    """
+    separator = "" if (not text or text.endswith("\n")) else "\n"
+    updated = text + separator + new_text
+    path.write_text(updated, encoding="utf-8")
+    relative = path.relative_to(agent.root).as_posix()
+    return f"appended to {relative}\n{_patched_excerpt(updated, len(text) + len(separator), new_text)}"
+
+
 def tool_patch_file(agent, args):
     path = agent.path(args["path"])
     if not path.is_file():
         raise wrong_kind_error(agent, path, "file")
     old_text = str(args.get("old_text", ""))
-    if not old_text:
-        raise ValueError("old_text must not be empty")
     if "new_text" not in args:
         raise ValueError("missing new_text")
     text = path.read_text(encoding="utf-8")
+    if not old_text:
+        return _append_to_file(agent, path, text, str(args["new_text"]))
     count = text.count(old_text)
     if count != 1:
         raise patch_match_error(agent, count, _relative_to_root(agent, path))
@@ -939,7 +1000,7 @@ def tool_patch_file(agent, args):
     start_offset = text.index(old_text)
     updated = text.replace(old_text, new_text, 1)
     path.write_text(updated, encoding="utf-8")
-    relative = path.relative_to(agent.root)
+    relative = path.relative_to(agent.root).as_posix()
     return f"patched {relative}\n{_patched_excerpt(updated, start_offset, new_text)}"
 
 
@@ -954,6 +1015,7 @@ def tool_delegate(agent, args):
         raise ValueError(f"max_steps must be in [1, {DELEGATE_MAX_STEPS_CEILING}]")
 
     from .runtime import CodingForMe
+    from .models import count_tokens
 
     child = CodingForMe(
         model_client=agent.model_client,
@@ -968,12 +1030,84 @@ def tool_delegate(agent, args):
         read_only=True,
         secret_env_names=agent.secret_env_names,
         shell_env_allowlist=agent.shell_env_allowlist,
+        # 消融开关必须传下去。不传的话，一个 `no_tool_output_spill` 变体在子 agent
+        # 里仍然是开着的——被测的那个机制在委派出去的那段调查里照常生效，而工件上
+        # 完全看不出来。同一类问题的三个面：工具集、开关、窗口档位，下面依次处理。
+        feature_flags=dict(agent.feature_flags),
     )
+    # 子 agent 继承父的**有效工具集**，取交集不是覆盖。
+    #
+    # 为什么必须有这一步（实测确认过的越权，不是理论风险）：父 agent 的注册表被
+    # 「变体白名单 ∩ 任务白名单」裁过，而 `build_tool_registry()` 给子 agent 的
+    # 是**完整**注册表。`read_only=True` 只挡得住 risky 的那三个（run_shell /
+    # write_file / patch_file），`search` 和 `list_files` 是 risky=False，照常执行。
+    # 探针：父白名单 `("delegate", "read_file")`，子 agent 成功跑完一次 `search`
+    # 并把结果带回了父的最终答案。
+    #
+    # 而且这个越权在工件上**看不见**：子 agent 是一个独立的 run，它的
+    # `declared_tools_allowlist` 从来没被设过，于是 L1 的 `tools_allowlist_respected`
+    # 对它返回「不适用」——漏检在报告里长得和通过一模一样。所以下面两件事要一起做：
+    # 裁注册表，并把这条边界如实记进子 run 的工件。
+    inherited = {name: spec for name, spec in child.tools.items() if name in agent.tools}
+    if inherited != child.tools:
+        child.tools = inherited
+        # 工具集变了，prefix 和 tool_signature 都得跟着变，否则发给模型的工具
+        # 清单和实际注册表对不上。
+        child.refresh_prefix(force=True)
+    child.declared_tools_allowlist = tuple(sorted(child.tools))
+    # 窗口档位也继承：`window_16k` 这类变体不传下去的话，子 agent 会按模型自己报的
+    # 窗口重新派生预算，于是「这次跑批用的是 16k 档」这句话对委派出去的那段调查
+    # 不成立。
+    if getattr(agent, "context_window", None):
+        child.set_context_window(int(agent.context_window))
     # 委派的目标是“调查”，不是“放权执行”。
     # 子 agent 以只读方式运行、步数更少，最后只把结论文本返回给父 agent。
     child.session["memory"]["task"] = task
-    child.session["memory"]["notes"] = [clip(agent.history_text(), 300)]
-    return "delegate_result:\n" + child.ask(task)
+    # 145 个 token（原 300 字符，按转录实测的 2.07 字符/token 折算）。子 agent
+    # 继承的这段历史同样要进它的 prompt，单位跟着上下文预算走。
+    child.session["memory"]["notes"] = [clip(agent.history_text(), 145)]
+    answer = child.ask(task)
+    # 上下文治理的记账。委派这个机制的全部价值是「那段调查的过程不进主上下文」，
+    # 而省下多少只有这两个数之差说得清：子 agent 自己积累的转录有多大，主上下文
+    # 实际收到的结论有多大。没有它们，「委派省了上下文」和「委派什么都没省」在
+    # 工件上长得一模一样——`run_plan` 那一节踩过同一个坑，这里照它的口径写，
+    # 零值也照常落。
+    child_state = getattr(child, "current_task_state", None)
+    child_transcript_tokens = count_tokens(child.history_text())
+    result_tokens = count_tokens(answer)
+    agent._last_delegate_stats = {
+        "delegate_child_run_id": getattr(child_state, "run_id", ""),
+        "delegate_child_turns": int(getattr(child_state, "attempts", 0) or 0),
+        "delegate_child_tool_steps": int(getattr(child_state, "tool_steps", 0) or 0),
+        "delegate_child_stop_reason": str(getattr(child_state, "stop_reason", "") or ""),
+        # 子上下文里积累的转录（不进主上下文的那部分）。
+        "delegate_child_transcript_tokens": int(child_transcript_tokens),
+        # 主上下文实际收到的那一段。
+        "delegate_result_tokens": int(result_tokens),
+        # 省下的量 = 子转录 − 结论。和 `tool_output_spill` 的 `full - kept`、
+        # `run_plan` 的 `result_bytes - transcript_chars` 是同一个口径。
+        "delegate_saved_tokens": int(max(0, child_transcript_tokens - result_tokens)),
+        "delegate_child_tools": sorted(child.tools),
+    }
+    # 子 agent 没跑到终点时，必须在回给父 agent 的那句话里说出来。
+    #
+    # 实测缺陷（这一句就是为它补的）：一次 15 任务的 live 跑批里 5 次委派有 **4 次**
+    # 子 agent 是撞步数上限被截停的（`step_limit_reached`），回给父的是一句半截结论，
+    # 而字符串形状和跑完的那次**一模一样**——父 agent 无从知道那份调查没做完，于是
+    # 拿一个不完整的结论继续往下推。这和「掉出窗口的工具结果要留占位」「零值也照写」
+    # 是同一条原则：**静默的降级比明说的失败更糟**。
+    #
+    # 刻意不重试、不自动加步数：那是父 agent 的决定（它可以换个更小的问题再委派
+    # 一次，也可以自己去读）。这里只负责把事实说出来。
+    stop_reason = str(getattr(child_state, "stop_reason", "") or "")
+    if stop_reason and stop_reason != STOP_REASON_FINAL_ANSWER_RETURNED:
+        header = (
+            "delegate_result (incomplete: child agent stopped early with "
+            "%s after %d of %d allowed tool calls; the answer below may be partial):\n"
+            % (stop_reason, int(getattr(child_state, "tool_steps", 0) or 0), max_steps)
+        )
+        return header + answer
+    return "delegate_result:\n" + answer
 
 
 def tool_run_plan(agent, args):

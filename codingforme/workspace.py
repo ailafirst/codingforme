@@ -11,8 +11,35 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-MAX_TOOL_OUTPUT = 4000
-MAX_HISTORY = 12000
+# 这两个上限的单位是 **token**，和上下文预算同一种单位。
+#
+# 它们限的都是「进模型上下文的量」——工具输出会原样回给模型，压平的历史文本同理——
+# 所以必须和 `ContextManager.total_budget` 用同一把尺子量。曾经它们是字符数，于是
+# 同一条链路上摆着两种单位：预算按 token 判，而喂进预算的那些文本按字符裁，谁也
+# 换算不到谁。
+#
+# 数值由原先的字符值按**这条链路自己实际装的内容**实测出的字符/token 比折算（统一
+# 折半是错的，比值随内容类型差 2.4 倍，见 `context_manager.py` 顶部那张表）：工具
+# 输出主要是源码，实测 3.02，4000 ÷ 3.02 ≈ 1320；压平历史是中文请求与工具输出混合，
+# 实测 2.07，12000 ÷ 2.07 ≈ 5800。
+# **这是下限，不是上限。** 真正生效的是 `context_manager.tool_output_limit()`
+# 从 `total_budget` 派生出来的值，本常量只在小档位（或 context_manager 尚未装配时）
+# 兜底。写死一个绝对值与预算脱钩正是阶段二从各段配额里删掉的那个病。
+MAX_TOOL_OUTPUT = 1320
+MAX_HISTORY = 5800
+# 整份仓库快照的上限。它是**入口上限**，不是组装时的额度：`context_manager` 那边
+# 各段已经没有固定额度了，快照能进多少由这里决定，进去之后一个 token 都不再裁。
+#
+# 这个位置和 Claude Code 一致——它组装时不分配额度，限制加在读进来的那一刻
+# （auto memory 取前 200 行或 25KB，Codex 的 `project_doc_max_bytes` 是 32 KiB）。
+#
+# 8000 是**兜底**，正常仓库碰不到：实测本仓库整份快照 3058 token，其中
+# project_docs 2562（README/AGENTS/pyproject，每份各自已被 clip 到 1200）、
+# status 200、recent_commits 129、project_tree 只有 104。最坏情况是 4 份 doc 都满
+# （4×1200）加 status 满（1500），约 6500，仍在这条线以下。它防的是 status 或某份
+# doc 异常膨胀把整个 prefix 撑爆，而 prefix 现在是不裁的——没有这条线，一个
+# `git status` 刷出几千行的仓库会直接把预算吃光。
+MAX_SNAPSHOT_TOKENS = 8000
 # 这些文件最可能直接影响 agent 的行动方式。
 # 我们不会预加载整个仓库，只会先给模型一小份“导航包”。
 DOC_NAMES = ("AGENTS.md", "README.md", "pyproject.toml", "package.json")
@@ -23,11 +50,17 @@ def now():
     return datetime.now(timezone.utc).isoformat()
 
 
-def clip(text, limit=MAX_TOOL_OUTPUT):
+def clip(text, limit=MAX_TOOL_OUTPUT, model=None):
+    """把文本裁到 `limit` 个 **token** 以内。
+
+    单位是 token，因为它裁的东西最终都要进模型上下文（工具输出、压平的历史），
+    而上下文预算是按 token 判的。两边用同一把尺子，才谈得上「这段占了预算的多少」。
+    实现委托给 `models.clip_tokens()`，全系统只有那一个截断原语。
+    """
+    from .models import clip_tokens
+
     text = str(text)
-    if len(text) <= limit:
-        return text
-    return text[:limit] + f"\n...[truncated {len(text) - limit} chars]"
+    return clip_tokens(text, limit, model, marker=f"\n...[truncated to {int(limit)} tokens]")
 
 
 def middle(text, limit):
@@ -216,7 +249,9 @@ class WorkspaceContext:
             ("__TREE__", tree),
         ):
             template = template.replace(placeholder, str(value))
-        return template.strip()
+        # 入口上限。clip() 保留开头，所以裁掉的是 project_tree 那一段（模板里排最后），
+        # 而 cwd / branch / status / recent_commits 这些定位信息一定活着。
+        return clip(template.strip(), MAX_SNAPSHOT_TOKENS)
 
     def fingerprint(self):
         # 这个指纹用来判断仓库状态是否发生了足够大的变化，

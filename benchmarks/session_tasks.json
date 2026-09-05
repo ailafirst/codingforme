@@ -16,12 +16,25 @@
       "turns": [
         {
           "request": "Please remember this: the build command is uv run pytest.",
-          "outputs": [{"final": "Project convention: the build command is uv run pytest."}]
+          "outputs": [
+            {
+              "final": "Project convention: the build command is uv run pytest."
+            }
+          ]
         },
         {
           "request": "What build command should I use for this project?",
-          "outputs": [{"final": "Use uv run pytest."}],
-          "expect": {"notes_contain": ["uv run pytest"], "min_notes": 1}
+          "outputs": [
+            {
+              "final": "Use uv run pytest."
+            }
+          ],
+          "expect": {
+            "notes_contain": [
+              "uv run pytest"
+            ],
+            "min_notes": 1
+          }
         }
       ]
     },
@@ -32,22 +45,43 @@
       "turns": [
         {
           "request": "Please remember: lint runs with ruff check.",
-          "outputs": [{"final": "Project convention: lint runs with ruff check."}]
+          "outputs": [
+            {
+              "final": "Project convention: lint runs with ruff check."
+            }
+          ]
         },
         {
           "request": "Please remember: the runtime depends on litellm only.",
-          "outputs": [{"final": "Dependency: the runtime depends on litellm only."}]
+          "outputs": [
+            {
+              "final": "Dependency: the runtime depends on litellm only."
+            }
+          ]
         },
         {
           "request": "Please remember: architecture reports are written in Chinese.",
-          "outputs": [{"final": "Preference: architecture reports are written in Chinese."}]
+          "outputs": [
+            {
+              "final": "Preference: architecture reports are written in Chinese."
+            }
+          ]
         },
         {
           "request": "Before I open a PR, what does lint run and which runtime dependency is allowed?",
-          "outputs": [{"final": "Lint is ruff check; the only runtime dependency is litellm."}],
+          "outputs": [
+            {
+              "final": "Lint is ruff check; the only runtime dependency is litellm."
+            }
+          ],
           "expect": {
-            "notes_contain": ["ruff check", "litellm"],
-            "notes_exclude": ["architecture reports"],
+            "notes_contain": [
+              "ruff check",
+              "litellm"
+            ],
+            "notes_exclude": [
+              "architecture reports"
+            ],
             "min_notes": 2
           }
         }
@@ -60,23 +94,45 @@
       "turns": [
         {
           "request": "Please remember: indentation is 4 spaces.",
-          "outputs": [{"final": "Project convention: indentation is 4 spaces."}]
+          "outputs": [
+            {
+              "final": "Project convention: indentation is 4 spaces."
+            }
+          ]
         },
         {
           "request": "Please remember: the changelog is written in Chinese.",
-          "outputs": [{"final": "Preference: the changelog is written in Chinese."}]
+          "outputs": [
+            {
+              "final": "Preference: the changelog is written in Chinese."
+            }
+          ]
         },
         {
           "request": "We changed our mind. Please remember: indentation is 2 spaces.",
-          "outputs": [{"final": "Project convention: indentation is 2 spaces."}],
-          "expect": {"superseded": true}
+          "outputs": [
+            {
+              "final": "Project convention: indentation is 2 spaces."
+            }
+          ],
+          "expect": {
+            "superseded": true
+          }
         },
         {
           "request": "What indentation does this project use?",
-          "outputs": [{"final": "2 spaces."}],
+          "outputs": [
+            {
+              "final": "2 spaces."
+            }
+          ],
           "expect": {
-            "notes_contain": ["2 spaces"],
-            "notes_exclude": ["4 spaces"],
+            "notes_contain": [
+              "2 spaces"
+            ],
+            "notes_exclude": [
+              "4 spaces"
+            ],
             "min_notes": 1
           }
         }
@@ -89,18 +145,239 @@
       "turns": [
         {
           "request": "Please remember: the release tag is v0.2.0.",
-          "outputs": [{"final": "Decision: release tag is v0.2.0."}]
+          "outputs": [
+            {
+              "final": "Decision: release tag is v0.2.0."
+            }
+          ]
         },
         {
           "request": "Please remember: the next milestone is eval-p1.",
-          "outputs": [{"final": "Decision: milestone is eval-p1."}],
+          "outputs": [
+            {
+              "final": "Decision: milestone is eval-p1."
+            }
+          ],
           "restart_before": true
         },
         {
           "request": "Which release tag did we pick?",
-          "outputs": [{"final": "v0.2.0."}],
+          "outputs": [
+            {
+              "final": "v0.2.0."
+            }
+          ],
           "restart_before": true,
-          "expect": {"notes_contain": ["v0.2.0"], "min_notes": 1}
+          "expect": {
+            "notes_contain": [
+              "v0.2.0"
+            ],
+            "min_notes": 1
+          }
+        }
+      ]
+    },
+    {
+      "id": "long_dialogue_pressure",
+      "question_type": "context_pressure",
+      "description": "合成压力探针:24 轮纯对话,每轮用户追加一条规格、助手把累计的整份规格读回去。存在的理由是 L1(工具结果落盘)和 L3(热尾)把工具结果那条路径上的压力吃干净了——三个窗口档位、178 个真实预算轮次,budget_reductions 恒为 0。user/assistant 的文本是这两级都碰不到的唯一成分,所以造压力只能靠拉长对话。它测的是 harness 会不会压缩、压缩之后丢了什么,不是模型能力。",
+      "turns": [
+        {
+          "request": "Requirement 1 for the release tool: the release CLI must read its configuration from release.toml at the repository root, and fail loudly with the offending key name when a field is missing rather than falling back to a built-in default. Add it to the running spec and read the whole spec back to me so I can check nothing was lost.",
+          "outputs": [
+            {
+              "final": "Acknowledged. The spec now has 1 requirement(s):\n1. the release CLI must read its configuration from release.toml at the repository root, and fail loudly with the offending key name when a field is missing rather than falling back to a built-in default"
+            }
+          ]
+        },
+        {
+          "request": "Requirement 2 for the release tool: every published artifact must carry a manifest listing the git commit, the build host, the toolchain version, and the sha256 of each file it contains. Add it to the running spec and read the whole spec back to me so I can check nothing was lost.",
+          "outputs": [
+            {
+              "final": "Acknowledged. The spec now has 2 requirement(s):\n1. the release CLI must read its configuration from release.toml at the repository root, and fail loudly with the offending key name when a field is missing rather than falling back to a built-in default\n2. every published artifact must carry a manifest listing the git commit, the build host, the toolchain version, and the sha256 of each file it contains"
+            }
+          ]
+        },
+        {
+          "request": "Requirement 3 for the release tool: the packaging step must be reproducible: running it twice on the same commit has to produce byte-identical archives, so timestamps inside the archive are pinned to the commit date. Add it to the running spec and read the whole spec back to me so I can check nothing was lost.",
+          "outputs": [
+            {
+              "final": "Acknowledged. The spec now has 3 requirement(s):\n1. the release CLI must read its configuration from release.toml at the repository root, and fail loudly with the offending key name when a field is missing rather than falling back to a built-in default\n2. every published artifact must carry a manifest listing the git commit, the build host, the toolchain version, and the sha256 of each file it contains\n3. the packaging step must be reproducible: running it twice on the same commit has to produce byte-identical archives, so timestamps inside the archive are pinned to the commit date"
+            }
+          ]
+        },
+        {
+          "request": "Requirement 4 for the release tool: uploads must be resumable, because release archives regularly exceed two gigabytes and the office link drops several times an hour during the afternoon. Add it to the running spec and read the whole spec back to me so I can check nothing was lost.",
+          "outputs": [
+            {
+              "final": "Acknowledged. The spec now has 4 requirement(s):\n1. the release CLI must read its configuration from release.toml at the repository root, and fail loudly with the offending key name when a field is missing rather than falling back to a built-in default\n2. every published artifact must carry a manifest listing the git commit, the build host, the toolchain version, and the sha256 of each file it contains\n3. the packaging step must be reproducible: running it twice on the same commit has to produce byte-identical archives, so timestamps inside the archive are pinned to the commit date\n4. uploads must be resumable, because release archives regularly exceed two gigabytes and the office link drops several times an hour during the afternoon"
+            }
+          ]
+        },
+        {
+          "request": "Requirement 5 for the release tool: the changelog is generated from commit trailers, not from commit subjects, so that a rewritten subject line never silently changes what shipped in a past release. Add it to the running spec and read the whole spec back to me so I can check nothing was lost.",
+          "outputs": [
+            {
+              "final": "Acknowledged. The spec now has 5 requirement(s):\n1. the release CLI must read its configuration from release.toml at the repository root, and fail loudly with the offending key name when a field is missing rather than falling back to a built-in default\n2. every published artifact must carry a manifest listing the git commit, the build host, the toolchain version, and the sha256 of each file it contains\n3. the packaging step must be reproducible: running it twice on the same commit has to produce byte-identical archives, so timestamps inside the archive are pinned to the commit date\n4. uploads must be resumable, because release archives regularly exceed two gigabytes and the office link drops several times an hour during the afternoon\n5. the changelog is generated from commit trailers, not from commit subjects, so that a rewritten subject line never silently changes what shipped in a past release"
+            }
+          ]
+        },
+        {
+          "request": "Requirement 6 for the release tool: any release marked prerelease must refuse to overwrite an existing tag, and must print the existing tag's manifest sha256 next to the new one when it refuses. Add it to the running spec and read the whole spec back to me so I can check nothing was lost.",
+          "outputs": [
+            {
+              "final": "Acknowledged. The spec now has 6 requirement(s):\n1. the release CLI must read its configuration from release.toml at the repository root, and fail loudly with the offending key name when a field is missing rather than falling back to a built-in default\n2. every published artifact must carry a manifest listing the git commit, the build host, the toolchain version, and the sha256 of each file it contains\n3. the packaging step must be reproducible: running it twice on the same commit has to produce byte-identical archives, so timestamps inside the archive are pinned to the commit date\n4. uploads must be resumable, because release archives regularly exceed two gigabytes and the office link drops several times an hour during the afternoon\n5. the changelog is generated from commit trailers, not from commit subjects, so that a rewritten subject line never silently changes what shipped in a past release\n6. any release marked prerelease must refuse to overwrite an existing tag, and must print the existing tag's manifest sha256 next to the new one when it refuses"
+            }
+          ]
+        },
+        {
+          "request": "Requirement 7 for the release tool: credentials come only from the environment, never from release.toml, and the tool must redact anything matching a token pattern before writing its own logs. Add it to the running spec and read the whole spec back to me so I can check nothing was lost.",
+          "outputs": [
+            {
+              "final": "Acknowledged. The spec now has 7 requirement(s):\n1. the release CLI must read its configuration from release.toml at the repository root, and fail loudly with the offending key name when a field is missing rather than falling back to a built-in default\n2. every published artifact must carry a manifest listing the git commit, the build host, the toolchain version, and the sha256 of each file it contains\n3. the packaging step must be reproducible: running it twice on the same commit has to produce byte-identical archives, so timestamps inside the archive are pinned to the commit date\n4. uploads must be resumable, because release archives regularly exceed two gigabytes and the office link drops several times an hour during the afternoon\n5. the changelog is generated from commit trailers, not from commit subjects, so that a rewritten subject line never silently changes what shipped in a past release\n6. any release marked prerelease must refuse to overwrite an existing tag, and must print the existing tag's manifest sha256 next to the new one when it refuses\n7. credentials come only from the environment, never from release.toml, and the tool must redact anything matching a token pattern before writing its own logs"
+            }
+          ]
+        },
+        {
+          "request": "Requirement 8 for the release tool: the dry-run mode has to exercise every code path except the final upload, including manifest generation and signature creation, so a dry run that passes means the real run will too. Add it to the running spec and read the whole spec back to me so I can check nothing was lost.",
+          "outputs": [
+            {
+              "final": "Acknowledged. The spec now has 8 requirement(s):\n1. the release CLI must read its configuration from release.toml at the repository root, and fail loudly with the offending key name when a field is missing rather than falling back to a built-in default\n2. every published artifact must carry a manifest listing the git commit, the build host, the toolchain version, and the sha256 of each file it contains\n3. the packaging step must be reproducible: running it twice on the same commit has to produce byte-identical archives, so timestamps inside the archive are pinned to the commit date\n4. uploads must be resumable, because release archives regularly exceed two gigabytes and the office link drops several times an hour during the afternoon\n5. the changelog is generated from commit trailers, not from commit subjects, so that a rewritten subject line never silently changes what shipped in a past release\n6. any release marked prerelease must refuse to overwrite an existing tag, and must print the existing tag's manifest sha256 next to the new one when it refuses\n7. credentials come only from the environment, never from release.toml, and the tool must redact anything matching a token pattern before writing its own logs\n8. the dry-run mode has to exercise every code path except the final upload, including manifest generation and signature creation, so a dry run that passes means the real run will too"
+            }
+          ]
+        },
+        {
+          "request": "Requirement 9 for the release tool: signing uses a detached signature stored beside the archive, and verification must be possible with nothing but the public key and the two files. Add it to the running spec and read the whole spec back to me so I can check nothing was lost.",
+          "outputs": [
+            {
+              "final": "Acknowledged. The spec now has 9 requirement(s):\n1. the release CLI must read its configuration from release.toml at the repository root, and fail loudly with the offending key name when a field is missing rather than falling back to a built-in default\n2. every published artifact must carry a manifest listing the git commit, the build host, the toolchain version, and the sha256 of each file it contains\n3. the packaging step must be reproducible: running it twice on the same commit has to produce byte-identical archives, so timestamps inside the archive are pinned to the commit date\n4. uploads must be resumable, because release archives regularly exceed two gigabytes and the office link drops several times an hour during the afternoon\n5. the changelog is generated from commit trailers, not from commit subjects, so that a rewritten subject line never silently changes what shipped in a past release\n6. any release marked prerelease must refuse to overwrite an existing tag, and must print the existing tag's manifest sha256 next to the new one when it refuses\n7. credentials come only from the environment, never from release.toml, and the tool must redact anything matching a token pattern before writing its own logs\n8. the dry-run mode has to exercise every code path except the final upload, including manifest generation and signature creation, so a dry run that passes means the real run will too\n9. signing uses a detached signature stored beside the archive, and verification must be possible with nothing but the public key and the two files"
+            }
+          ]
+        },
+        {
+          "request": "Requirement 10 for the release tool: the tool must refuse to run on a dirty working tree unless an explicit allow-dirty flag is passed, and that flag must be recorded in the manifest. Add it to the running spec and read the whole spec back to me so I can check nothing was lost.",
+          "outputs": [
+            {
+              "final": "Acknowledged. The spec now has 10 requirement(s):\n1. the release CLI must read its configuration from release.toml at the repository root, and fail loudly with the offending key name when a field is missing rather than falling back to a built-in default\n2. every published artifact must carry a manifest listing the git commit, the build host, the toolchain version, and the sha256 of each file it contains\n3. the packaging step must be reproducible: running it twice on the same commit has to produce byte-identical archives, so timestamps inside the archive are pinned to the commit date\n4. uploads must be resumable, because release archives regularly exceed two gigabytes and the office link drops several times an hour during the afternoon\n5. the changelog is generated from commit trailers, not from commit subjects, so that a rewritten subject line never silently changes what shipped in a past release\n6. any release marked prerelease must refuse to overwrite an existing tag, and must print the existing tag's manifest sha256 next to the new one when it refuses\n7. credentials come only from the environment, never from release.toml, and the tool must redact anything matching a token pattern before writing its own logs\n8. the dry-run mode has to exercise every code path except the final upload, including manifest generation and signature creation, so a dry run that passes means the real run will too\n9. signing uses a detached signature stored beside the archive, and verification must be possible with nothing but the public key and the two files\n10. the tool must refuse to run on a dirty working tree unless an explicit allow-dirty flag is passed, and that flag must be recorded in the manifest"
+            }
+          ]
+        },
+        {
+          "request": "Requirement 11 for the release tool: rollback is a first-class command: given a previous release id it restores the published pointers without needing the original build machine. Add it to the running spec and read the whole spec back to me so I can check nothing was lost.",
+          "outputs": [
+            {
+              "final": "Acknowledged. The spec now has 11 requirement(s):\n1. the release CLI must read its configuration from release.toml at the repository root, and fail loudly with the offending key name when a field is missing rather than falling back to a built-in default\n2. every published artifact must carry a manifest listing the git commit, the build host, the toolchain version, and the sha256 of each file it contains\n3. the packaging step must be reproducible: running it twice on the same commit has to produce byte-identical archives, so timestamps inside the archive are pinned to the commit date\n4. uploads must be resumable, because release archives regularly exceed two gigabytes and the office link drops several times an hour during the afternoon\n5. the changelog is generated from commit trailers, not from commit subjects, so that a rewritten subject line never silently changes what shipped in a past release\n6. any release marked prerelease must refuse to overwrite an existing tag, and must print the existing tag's manifest sha256 next to the new one when it refuses\n7. credentials come only from the environment, never from release.toml, and the tool must redact anything matching a token pattern before writing its own logs\n8. the dry-run mode has to exercise every code path except the final upload, including manifest generation and signature creation, so a dry run that passes means the real run will too\n9. signing uses a detached signature stored beside the archive, and verification must be possible with nothing but the public key and the two files\n10. the tool must refuse to run on a dirty working tree unless an explicit allow-dirty flag is passed, and that flag must be recorded in the manifest\n11. rollback is a first-class command: given a previous release id it restores the published pointers without needing the original build machine"
+            }
+          ]
+        },
+        {
+          "request": "Requirement 12 for the release tool: concurrent releases of the same package must be prevented by a lock held in the artifact store itself, not by a local lockfile that a second machine cannot see. Add it to the running spec and read the whole spec back to me so I can check nothing was lost.",
+          "outputs": [
+            {
+              "final": "Acknowledged. The spec now has 12 requirement(s):\n1. the release CLI must read its configuration from release.toml at the repository root, and fail loudly with the offending key name when a field is missing rather than falling back to a built-in default\n2. every published artifact must carry a manifest listing the git commit, the build host, the toolchain version, and the sha256 of each file it contains\n3. the packaging step must be reproducible: running it twice on the same commit has to produce byte-identical archives, so timestamps inside the archive are pinned to the commit date\n4. uploads must be resumable, because release archives regularly exceed two gigabytes and the office link drops several times an hour during the afternoon\n5. the changelog is generated from commit trailers, not from commit subjects, so that a rewritten subject line never silently changes what shipped in a past release\n6. any release marked prerelease must refuse to overwrite an existing tag, and must print the existing tag's manifest sha256 next to the new one when it refuses\n7. credentials come only from the environment, never from release.toml, and the tool must redact anything matching a token pattern before writing its own logs\n8. the dry-run mode has to exercise every code path except the final upload, including manifest generation and signature creation, so a dry run that passes means the real run will too\n9. signing uses a detached signature stored beside the archive, and verification must be possible with nothing but the public key and the two files\n10. the tool must refuse to run on a dirty working tree unless an explicit allow-dirty flag is passed, and that flag must be recorded in the manifest\n11. rollback is a first-class command: given a previous release id it restores the published pointers without needing the original build machine\n12. concurrent releases of the same package must be prevented by a lock held in the artifact store itself, not by a local lockfile that a second machine cannot see"
+            }
+          ]
+        },
+        {
+          "request": "Requirement 13 for the release tool: the progress output must be usable in CI logs, which means no carriage-return animation and one line per completed phase with elapsed seconds. Add it to the running spec and read the whole spec back to me so I can check nothing was lost.",
+          "outputs": [
+            {
+              "final": "Acknowledged. The spec now has 13 requirement(s):\n1. the release CLI must read its configuration from release.toml at the repository root, and fail loudly with the offending key name when a field is missing rather than falling back to a built-in default\n2. every published artifact must carry a manifest listing the git commit, the build host, the toolchain version, and the sha256 of each file it contains\n3. the packaging step must be reproducible: running it twice on the same commit has to produce byte-identical archives, so timestamps inside the archive are pinned to the commit date\n4. uploads must be resumable, because release archives regularly exceed two gigabytes and the office link drops several times an hour during the afternoon\n5. the changelog is generated from commit trailers, not from commit subjects, so that a rewritten subject line never silently changes what shipped in a past release\n6. any release marked prerelease must refuse to overwrite an existing tag, and must print the existing tag's manifest sha256 next to the new one when it refuses\n7. credentials come only from the environment, never from release.toml, and the tool must redact anything matching a token pattern before writing its own logs\n8. the dry-run mode has to exercise every code path except the final upload, including manifest generation and signature creation, so a dry run that passes means the real run will too\n9. signing uses a detached signature stored beside the archive, and verification must be possible with nothing but the public key and the two files\n10. the tool must refuse to run on a dirty working tree unless an explicit allow-dirty flag is passed, and that flag must be recorded in the manifest\n11. rollback is a first-class command: given a previous release id it restores the published pointers without needing the original build machine\n12. concurrent releases of the same package must be prevented by a lock held in the artifact store itself, not by a local lockfile that a second machine cannot see\n13. the progress output must be usable in CI logs, which means no carriage-return animation and one line per completed phase with elapsed seconds"
+            }
+          ]
+        },
+        {
+          "request": "Requirement 14 for the release tool: network retries use exponential backoff capped at sixty seconds, and the total attempt budget is configurable per phase rather than globally. Add it to the running spec and read the whole spec back to me so I can check nothing was lost.",
+          "outputs": [
+            {
+              "final": "Acknowledged. The spec now has 14 requirement(s):\n1. the release CLI must read its configuration from release.toml at the repository root, and fail loudly with the offending key name when a field is missing rather than falling back to a built-in default\n2. every published artifact must carry a manifest listing the git commit, the build host, the toolchain version, and the sha256 of each file it contains\n3. the packaging step must be reproducible: running it twice on the same commit has to produce byte-identical archives, so timestamps inside the archive are pinned to the commit date\n4. uploads must be resumable, because release archives regularly exceed two gigabytes and the office link drops several times an hour during the afternoon\n5. the changelog is generated from commit trailers, not from commit subjects, so that a rewritten subject line never silently changes what shipped in a past release\n6. any release marked prerelease must refuse to overwrite an existing tag, and must print the existing tag's manifest sha256 next to the new one when it refuses\n7. credentials come only from the environment, never from release.toml, and the tool must redact anything matching a token pattern before writing its own logs\n8. the dry-run mode has to exercise every code path except the final upload, including manifest generation and signature creation, so a dry run that passes means the real run will too\n9. signing uses a detached signature stored beside the archive, and verification must be possible with nothing but the public key and the two files\n10. the tool must refuse to run on a dirty working tree unless an explicit allow-dirty flag is passed, and that flag must be recorded in the manifest\n11. rollback is a first-class command: given a previous release id it restores the published pointers without needing the original build machine\n12. concurrent releases of the same package must be prevented by a lock held in the artifact store itself, not by a local lockfile that a second machine cannot see\n13. the progress output must be usable in CI logs, which means no carriage-return animation and one line per completed phase with elapsed seconds\n14. network retries use exponential backoff capped at sixty seconds, and the total attempt budget is configurable per phase rather than globally"
+            }
+          ]
+        },
+        {
+          "request": "Requirement 15 for the release tool: the manifest schema is versioned, and readers must reject a manifest whose major version they do not recognise instead of ignoring unknown fields. Add it to the running spec and read the whole spec back to me so I can check nothing was lost.",
+          "outputs": [
+            {
+              "final": "Acknowledged. The spec now has 15 requirement(s):\n1. the release CLI must read its configuration from release.toml at the repository root, and fail loudly with the offending key name when a field is missing rather than falling back to a built-in default\n2. every published artifact must carry a manifest listing the git commit, the build host, the toolchain version, and the sha256 of each file it contains\n3. the packaging step must be reproducible: running it twice on the same commit has to produce byte-identical archives, so timestamps inside the archive are pinned to the commit date\n4. uploads must be resumable, because release archives regularly exceed two gigabytes and the office link drops several times an hour during the afternoon\n5. the changelog is generated from commit trailers, not from commit subjects, so that a rewritten subject line never silently changes what shipped in a past release\n6. any release marked prerelease must refuse to overwrite an existing tag, and must print the existing tag's manifest sha256 next to the new one when it refuses\n7. credentials come only from the environment, never from release.toml, and the tool must redact anything matching a token pattern before writing its own logs\n8. the dry-run mode has to exercise every code path except the final upload, including manifest generation and signature creation, so a dry run that passes means the real run will too\n9. signing uses a detached signature stored beside the archive, and verification must be possible with nothing but the public key and the two files\n10. the tool must refuse to run on a dirty working tree unless an explicit allow-dirty flag is passed, and that flag must be recorded in the manifest\n11. rollback is a first-class command: given a previous release id it restores the published pointers without needing the original build machine\n12. concurrent releases of the same package must be prevented by a lock held in the artifact store itself, not by a local lockfile that a second machine cannot see\n13. the progress output must be usable in CI logs, which means no carriage-return animation and one line per completed phase with elapsed seconds\n14. network retries use exponential backoff capped at sixty seconds, and the total attempt budget is configurable per phase rather than globally\n15. the manifest schema is versioned, and readers must reject a manifest whose major version they do not recognise instead of ignoring unknown fields"
+            }
+          ]
+        },
+        {
+          "request": "Requirement 16 for the release tool: the tool must emit a machine-readable summary on stdout and keep all human-oriented narration on stderr, so a caller can pipe one without filtering the other. Add it to the running spec and read the whole spec back to me so I can check nothing was lost.",
+          "outputs": [
+            {
+              "final": "Acknowledged. The spec now has 16 requirement(s):\n1. the release CLI must read its configuration from release.toml at the repository root, and fail loudly with the offending key name when a field is missing rather than falling back to a built-in default\n2. every published artifact must carry a manifest listing the git commit, the build host, the toolchain version, and the sha256 of each file it contains\n3. the packaging step must be reproducible: running it twice on the same commit has to produce byte-identical archives, so timestamps inside the archive are pinned to the commit date\n4. uploads must be resumable, because release archives regularly exceed two gigabytes and the office link drops several times an hour during the afternoon\n5. the changelog is generated from commit trailers, not from commit subjects, so that a rewritten subject line never silently changes what shipped in a past release\n6. any release marked prerelease must refuse to overwrite an existing tag, and must print the existing tag's manifest sha256 next to the new one when it refuses\n7. credentials come only from the environment, never from release.toml, and the tool must redact anything matching a token pattern before writing its own logs\n8. the dry-run mode has to exercise every code path except the final upload, including manifest generation and signature creation, so a dry run that passes means the real run will too\n9. signing uses a detached signature stored beside the archive, and verification must be possible with nothing but the public key and the two files\n10. the tool must refuse to run on a dirty working tree unless an explicit allow-dirty flag is passed, and that flag must be recorded in the manifest\n11. rollback is a first-class command: given a previous release id it restores the published pointers without needing the original build machine\n12. concurrent releases of the same package must be prevented by a lock held in the artifact store itself, not by a local lockfile that a second machine cannot see\n13. the progress output must be usable in CI logs, which means no carriage-return animation and one line per completed phase with elapsed seconds\n14. network retries use exponential backoff capped at sixty seconds, and the total attempt budget is configurable per phase rather than globally\n15. the manifest schema is versioned, and readers must reject a manifest whose major version they do not recognise instead of ignoring unknown fields\n16. the tool must emit a machine-readable summary on stdout and keep all human-oriented narration on stderr, so a caller can pipe one without filtering the other"
+            }
+          ]
+        },
+        {
+          "request": "Requirement 17 for the release tool: release notes support an optional migration section, and if any commit trailer declares a breaking change the section becomes mandatory and the release fails without it. Add it to the running spec and read the whole spec back to me so I can check nothing was lost.",
+          "outputs": [
+            {
+              "final": "Acknowledged. The spec now has 17 requirement(s):\n1. the release CLI must read its configuration from release.toml at the repository root, and fail loudly with the offending key name when a field is missing rather than falling back to a built-in default\n2. every published artifact must carry a manifest listing the git commit, the build host, the toolchain version, and the sha256 of each file it contains\n3. the packaging step must be reproducible: running it twice on the same commit has to produce byte-identical archives, so timestamps inside the archive are pinned to the commit date\n4. uploads must be resumable, because release archives regularly exceed two gigabytes and the office link drops several times an hour during the afternoon\n5. the changelog is generated from commit trailers, not from commit subjects, so that a rewritten subject line never silently changes what shipped in a past release\n6. any release marked prerelease must refuse to overwrite an existing tag, and must print the existing tag's manifest sha256 next to the new one when it refuses\n7. credentials come only from the environment, never from release.toml, and the tool must redact anything matching a token pattern before writing its own logs\n8. the dry-run mode has to exercise every code path except the final upload, including manifest generation and signature creation, so a dry run that passes means the real run will too\n9. signing uses a detached signature stored beside the archive, and verification must be possible with nothing but the public key and the two files\n10. the tool must refuse to run on a dirty working tree unless an explicit allow-dirty flag is passed, and that flag must be recorded in the manifest\n11. rollback is a first-class command: given a previous release id it restores the published pointers without needing the original build machine\n12. concurrent releases of the same package must be prevented by a lock held in the artifact store itself, not by a local lockfile that a second machine cannot see\n13. the progress output must be usable in CI logs, which means no carriage-return animation and one line per completed phase with elapsed seconds\n14. network retries use exponential backoff capped at sixty seconds, and the total attempt budget is configurable per phase rather than globally\n15. the manifest schema is versioned, and readers must reject a manifest whose major version they do not recognise instead of ignoring unknown fields\n16. the tool must emit a machine-readable summary on stdout and keep all human-oriented narration on stderr, so a caller can pipe one without filtering the other\n17. release notes support an optional migration section, and if any commit trailer declares a breaking change the section becomes mandatory and the release fails without it"
+            }
+          ]
+        },
+        {
+          "request": "Requirement 18 for the release tool: the artifact store layout must be content-addressed under a per-package prefix, so that garbage collection can be implemented later without moving anything. Add it to the running spec and read the whole spec back to me so I can check nothing was lost.",
+          "outputs": [
+            {
+              "final": "Acknowledged. The spec now has 18 requirement(s):\n1. the release CLI must read its configuration from release.toml at the repository root, and fail loudly with the offending key name when a field is missing rather than falling back to a built-in default\n2. every published artifact must carry a manifest listing the git commit, the build host, the toolchain version, and the sha256 of each file it contains\n3. the packaging step must be reproducible: running it twice on the same commit has to produce byte-identical archives, so timestamps inside the archive are pinned to the commit date\n4. uploads must be resumable, because release archives regularly exceed two gigabytes and the office link drops several times an hour during the afternoon\n5. the changelog is generated from commit trailers, not from commit subjects, so that a rewritten subject line never silently changes what shipped in a past release\n6. any release marked prerelease must refuse to overwrite an existing tag, and must print the existing tag's manifest sha256 next to the new one when it refuses\n7. credentials come only from the environment, never from release.toml, and the tool must redact anything matching a token pattern before writing its own logs\n8. the dry-run mode has to exercise every code path except the final upload, including manifest generation and signature creation, so a dry run that passes means the real run will too\n9. signing uses a detached signature stored beside the archive, and verification must be possible with nothing but the public key and the two files\n10. the tool must refuse to run on a dirty working tree unless an explicit allow-dirty flag is passed, and that flag must be recorded in the manifest\n11. rollback is a first-class command: given a previous release id it restores the published pointers without needing the original build machine\n12. concurrent releases of the same package must be prevented by a lock held in the artifact store itself, not by a local lockfile that a second machine cannot see\n13. the progress output must be usable in CI logs, which means no carriage-return animation and one line per completed phase with elapsed seconds\n14. network retries use exponential backoff capped at sixty seconds, and the total attempt budget is configurable per phase rather than globally\n15. the manifest schema is versioned, and readers must reject a manifest whose major version they do not recognise instead of ignoring unknown fields\n16. the tool must emit a machine-readable summary on stdout and keep all human-oriented narration on stderr, so a caller can pipe one without filtering the other\n17. release notes support an optional migration section, and if any commit trailer declares a breaking change the section becomes mandatory and the release fails without it\n18. the artifact store layout must be content-addressed under a per-package prefix, so that garbage collection can be implemented later without moving anything"
+            }
+          ]
+        },
+        {
+          "request": "Requirement 19 for the release tool: timestamps in every output are UTC and ISO-8601 with an explicit offset, because past incidents were made unreadable by mixed local times across build machines. Add it to the running spec and read the whole spec back to me so I can check nothing was lost.",
+          "outputs": [
+            {
+              "final": "Acknowledged. The spec now has 19 requirement(s):\n1. the release CLI must read its configuration from release.toml at the repository root, and fail loudly with the offending key name when a field is missing rather than falling back to a built-in default\n2. every published artifact must carry a manifest listing the git commit, the build host, the toolchain version, and the sha256 of each file it contains\n3. the packaging step must be reproducible: running it twice on the same commit has to produce byte-identical archives, so timestamps inside the archive are pinned to the commit date\n4. uploads must be resumable, because release archives regularly exceed two gigabytes and the office link drops several times an hour during the afternoon\n5. the changelog is generated from commit trailers, not from commit subjects, so that a rewritten subject line never silently changes what shipped in a past release\n6. any release marked prerelease must refuse to overwrite an existing tag, and must print the existing tag's manifest sha256 next to the new one when it refuses\n7. credentials come only from the environment, never from release.toml, and the tool must redact anything matching a token pattern before writing its own logs\n8. the dry-run mode has to exercise every code path except the final upload, including manifest generation and signature creation, so a dry run that passes means the real run will too\n9. signing uses a detached signature stored beside the archive, and verification must be possible with nothing but the public key and the two files\n10. the tool must refuse to run on a dirty working tree unless an explicit allow-dirty flag is passed, and that flag must be recorded in the manifest\n11. rollback is a first-class command: given a previous release id it restores the published pointers without needing the original build machine\n12. concurrent releases of the same package must be prevented by a lock held in the artifact store itself, not by a local lockfile that a second machine cannot see\n13. the progress output must be usable in CI logs, which means no carriage-return animation and one line per completed phase with elapsed seconds\n14. network retries use exponential backoff capped at sixty seconds, and the total attempt budget is configurable per phase rather than globally\n15. the manifest schema is versioned, and readers must reject a manifest whose major version they do not recognise instead of ignoring unknown fields\n16. the tool must emit a machine-readable summary on stdout and keep all human-oriented narration on stderr, so a caller can pipe one without filtering the other\n17. release notes support an optional migration section, and if any commit trailer declares a breaking change the section becomes mandatory and the release fails without it\n18. the artifact store layout must be content-addressed under a per-package prefix, so that garbage collection can be implemented later without moving anything\n19. timestamps in every output are UTC and ISO-8601 with an explicit offset, because past incidents were made unreadable by mixed local times across build machines"
+            }
+          ]
+        },
+        {
+          "request": "Requirement 20 for the release tool: the tool must verify free disk space before starting the packaging phase and fail early with the required and available numbers rather than dying halfway through. Add it to the running spec and read the whole spec back to me so I can check nothing was lost.",
+          "outputs": [
+            {
+              "final": "Acknowledged. The spec now has 20 requirement(s):\n1. the release CLI must read its configuration from release.toml at the repository root, and fail loudly with the offending key name when a field is missing rather than falling back to a built-in default\n2. every published artifact must carry a manifest listing the git commit, the build host, the toolchain version, and the sha256 of each file it contains\n3. the packaging step must be reproducible: running it twice on the same commit has to produce byte-identical archives, so timestamps inside the archive are pinned to the commit date\n4. uploads must be resumable, because release archives regularly exceed two gigabytes and the office link drops several times an hour during the afternoon\n5. the changelog is generated from commit trailers, not from commit subjects, so that a rewritten subject line never silently changes what shipped in a past release\n6. any release marked prerelease must refuse to overwrite an existing tag, and must print the existing tag's manifest sha256 next to the new one when it refuses\n7. credentials come only from the environment, never from release.toml, and the tool must redact anything matching a token pattern before writing its own logs\n8. the dry-run mode has to exercise every code path except the final upload, including manifest generation and signature creation, so a dry run that passes means the real run will too\n9. signing uses a detached signature stored beside the archive, and verification must be possible with nothing but the public key and the two files\n10. the tool must refuse to run on a dirty working tree unless an explicit allow-dirty flag is passed, and that flag must be recorded in the manifest\n11. rollback is a first-class command: given a previous release id it restores the published pointers without needing the original build machine\n12. concurrent releases of the same package must be prevented by a lock held in the artifact store itself, not by a local lockfile that a second machine cannot see\n13. the progress output must be usable in CI logs, which means no carriage-return animation and one line per completed phase with elapsed seconds\n14. network retries use exponential backoff capped at sixty seconds, and the total attempt budget is configurable per phase rather than globally\n15. the manifest schema is versioned, and readers must reject a manifest whose major version they do not recognise instead of ignoring unknown fields\n16. the tool must emit a machine-readable summary on stdout and keep all human-oriented narration on stderr, so a caller can pipe one without filtering the other\n17. release notes support an optional migration section, and if any commit trailer declares a breaking change the section becomes mandatory and the release fails without it\n18. the artifact store layout must be content-addressed under a per-package prefix, so that garbage collection can be implemented later without moving anything\n19. timestamps in every output are UTC and ISO-8601 with an explicit offset, because past incidents were made unreadable by mixed local times across build machines\n20. the tool must verify free disk space before starting the packaging phase and fail early with the required and available numbers rather than dying halfway through"
+            }
+          ]
+        },
+        {
+          "request": "Requirement 21 for the release tool: each phase writes a structured event to a jsonl audit file, and that file is uploaded alongside the artifacts so a failed release can be reconstructed afterwards. Add it to the running spec and read the whole spec back to me so I can check nothing was lost.",
+          "outputs": [
+            {
+              "final": "Acknowledged. The spec now has 21 requirement(s):\n1. the release CLI must read its configuration from release.toml at the repository root, and fail loudly with the offending key name when a field is missing rather than falling back to a built-in default\n2. every published artifact must carry a manifest listing the git commit, the build host, the toolchain version, and the sha256 of each file it contains\n3. the packaging step must be reproducible: running it twice on the same commit has to produce byte-identical archives, so timestamps inside the archive are pinned to the commit date\n4. uploads must be resumable, because release archives regularly exceed two gigabytes and the office link drops several times an hour during the afternoon\n5. the changelog is generated from commit trailers, not from commit subjects, so that a rewritten subject line never silently changes what shipped in a past release\n6. any release marked prerelease must refuse to overwrite an existing tag, and must print the existing tag's manifest sha256 next to the new one when it refuses\n7. credentials come only from the environment, never from release.toml, and the tool must redact anything matching a token pattern before writing its own logs\n8. the dry-run mode has to exercise every code path except the final upload, including manifest generation and signature creation, so a dry run that passes means the real run will too\n9. signing uses a detached signature stored beside the archive, and verification must be possible with nothing but the public key and the two files\n10. the tool must refuse to run on a dirty working tree unless an explicit allow-dirty flag is passed, and that flag must be recorded in the manifest\n11. rollback is a first-class command: given a previous release id it restores the published pointers without needing the original build machine\n12. concurrent releases of the same package must be prevented by a lock held in the artifact store itself, not by a local lockfile that a second machine cannot see\n13. the progress output must be usable in CI logs, which means no carriage-return animation and one line per completed phase with elapsed seconds\n14. network retries use exponential backoff capped at sixty seconds, and the total attempt budget is configurable per phase rather than globally\n15. the manifest schema is versioned, and readers must reject a manifest whose major version they do not recognise instead of ignoring unknown fields\n16. the tool must emit a machine-readable summary on stdout and keep all human-oriented narration on stderr, so a caller can pipe one without filtering the other\n17. release notes support an optional migration section, and if any commit trailer declares a breaking change the section becomes mandatory and the release fails without it\n18. the artifact store layout must be content-addressed under a per-package prefix, so that garbage collection can be implemented later without moving anything\n19. timestamps in every output are UTC and ISO-8601 with an explicit offset, because past incidents were made unreadable by mixed local times across build machines\n20. the tool must verify free disk space before starting the packaging phase and fail early with the required and available numbers rather than dying halfway through\n21. each phase writes a structured event to a jsonl audit file, and that file is uploaded alongside the artifacts so a failed release can be reconstructed afterwards"
+            }
+          ]
+        },
+        {
+          "request": "Requirement 22 for the release tool: the configuration loader must support per-environment overlays, where the overlay can only narrow settings and is forbidden from introducing keys the base file never declared. Add it to the running spec and read the whole spec back to me so I can check nothing was lost.",
+          "outputs": [
+            {
+              "final": "Acknowledged. The spec now has 22 requirement(s):\n1. the release CLI must read its configuration from release.toml at the repository root, and fail loudly with the offending key name when a field is missing rather than falling back to a built-in default\n2. every published artifact must carry a manifest listing the git commit, the build host, the toolchain version, and the sha256 of each file it contains\n3. the packaging step must be reproducible: running it twice on the same commit has to produce byte-identical archives, so timestamps inside the archive are pinned to the commit date\n4. uploads must be resumable, because release archives regularly exceed two gigabytes and the office link drops several times an hour during the afternoon\n5. the changelog is generated from commit trailers, not from commit subjects, so that a rewritten subject line never silently changes what shipped in a past release\n6. any release marked prerelease must refuse to overwrite an existing tag, and must print the existing tag's manifest sha256 next to the new one when it refuses\n7. credentials come only from the environment, never from release.toml, and the tool must redact anything matching a token pattern before writing its own logs\n8. the dry-run mode has to exercise every code path except the final upload, including manifest generation and signature creation, so a dry run that passes means the real run will too\n9. signing uses a detached signature stored beside the archive, and verification must be possible with nothing but the public key and the two files\n10. the tool must refuse to run on a dirty working tree unless an explicit allow-dirty flag is passed, and that flag must be recorded in the manifest\n11. rollback is a first-class command: given a previous release id it restores the published pointers without needing the original build machine\n12. concurrent releases of the same package must be prevented by a lock held in the artifact store itself, not by a local lockfile that a second machine cannot see\n13. the progress output must be usable in CI logs, which means no carriage-return animation and one line per completed phase with elapsed seconds\n14. network retries use exponential backoff capped at sixty seconds, and the total attempt budget is configurable per phase rather than globally\n15. the manifest schema is versioned, and readers must reject a manifest whose major version they do not recognise instead of ignoring unknown fields\n16. the tool must emit a machine-readable summary on stdout and keep all human-oriented narration on stderr, so a caller can pipe one without filtering the other\n17. release notes support an optional migration section, and if any commit trailer declares a breaking change the section becomes mandatory and the release fails without it\n18. the artifact store layout must be content-addressed under a per-package prefix, so that garbage collection can be implemented later without moving anything\n19. timestamps in every output are UTC and ISO-8601 with an explicit offset, because past incidents were made unreadable by mixed local times across build machines\n20. the tool must verify free disk space before starting the packaging phase and fail early with the required and available numbers rather than dying halfway through\n21. each phase writes a structured event to a jsonl audit file, and that file is uploaded alongside the artifacts so a failed release can be reconstructed afterwards\n22. the configuration loader must support per-environment overlays, where the overlay can only narrow settings and is forbidden from introducing keys the base file never declared"
+            }
+          ]
+        },
+        {
+          "request": "Requirement 23 for the release tool: when the upload target rejects an archive the tool must preserve the local copy and print the exact path, because rebuilding a two gigabyte archive costs twenty minutes. Add it to the running spec and read the whole spec back to me so I can check nothing was lost.",
+          "outputs": [
+            {
+              "final": "Acknowledged. The spec now has 23 requirement(s):\n1. the release CLI must read its configuration from release.toml at the repository root, and fail loudly with the offending key name when a field is missing rather than falling back to a built-in default\n2. every published artifact must carry a manifest listing the git commit, the build host, the toolchain version, and the sha256 of each file it contains\n3. the packaging step must be reproducible: running it twice on the same commit has to produce byte-identical archives, so timestamps inside the archive are pinned to the commit date\n4. uploads must be resumable, because release archives regularly exceed two gigabytes and the office link drops several times an hour during the afternoon\n5. the changelog is generated from commit trailers, not from commit subjects, so that a rewritten subject line never silently changes what shipped in a past release\n6. any release marked prerelease must refuse to overwrite an existing tag, and must print the existing tag's manifest sha256 next to the new one when it refuses\n7. credentials come only from the environment, never from release.toml, and the tool must redact anything matching a token pattern before writing its own logs\n8. the dry-run mode has to exercise every code path except the final upload, including manifest generation and signature creation, so a dry run that passes means the real run will too\n9. signing uses a detached signature stored beside the archive, and verification must be possible with nothing but the public key and the two files\n10. the tool must refuse to run on a dirty working tree unless an explicit allow-dirty flag is passed, and that flag must be recorded in the manifest\n11. rollback is a first-class command: given a previous release id it restores the published pointers without needing the original build machine\n12. concurrent releases of the same package must be prevented by a lock held in the artifact store itself, not by a local lockfile that a second machine cannot see\n13. the progress output must be usable in CI logs, which means no carriage-return animation and one line per completed phase with elapsed seconds\n14. network retries use exponential backoff capped at sixty seconds, and the total attempt budget is configurable per phase rather than globally\n15. the manifest schema is versioned, and readers must reject a manifest whose major version they do not recognise instead of ignoring unknown fields\n16. the tool must emit a machine-readable summary on stdout and keep all human-oriented narration on stderr, so a caller can pipe one without filtering the other\n17. release notes support an optional migration section, and if any commit trailer declares a breaking change the section becomes mandatory and the release fails without it\n18. the artifact store layout must be content-addressed under a per-package prefix, so that garbage collection can be implemented later without moving anything\n19. timestamps in every output are UTC and ISO-8601 with an explicit offset, because past incidents were made unreadable by mixed local times across build machines\n20. the tool must verify free disk space before starting the packaging phase and fail early with the required and available numbers rather than dying halfway through\n21. each phase writes a structured event to a jsonl audit file, and that file is uploaded alongside the artifacts so a failed release can be reconstructed afterwards\n22. the configuration loader must support per-environment overlays, where the overlay can only narrow settings and is forbidden from introducing keys the base file never declared\n23. when the upload target rejects an archive the tool must preserve the local copy and print the exact path, because rebuilding a two gigabyte archive costs twenty minutes"
+            }
+          ]
+        },
+        {
+          "request": "Requirement 24 for the release tool: the exit code space is fixed and documented: configuration errors, verification failures, network failures, and internal errors each get a distinct code that never changes. Add it to the running spec and read the whole spec back to me so I can check nothing was lost.",
+          "outputs": [
+            {
+              "final": "Acknowledged. The spec now has 24 requirement(s):\n1. the release CLI must read its configuration from release.toml at the repository root, and fail loudly with the offending key name when a field is missing rather than falling back to a built-in default\n2. every published artifact must carry a manifest listing the git commit, the build host, the toolchain version, and the sha256 of each file it contains\n3. the packaging step must be reproducible: running it twice on the same commit has to produce byte-identical archives, so timestamps inside the archive are pinned to the commit date\n4. uploads must be resumable, because release archives regularly exceed two gigabytes and the office link drops several times an hour during the afternoon\n5. the changelog is generated from commit trailers, not from commit subjects, so that a rewritten subject line never silently changes what shipped in a past release\n6. any release marked prerelease must refuse to overwrite an existing tag, and must print the existing tag's manifest sha256 next to the new one when it refuses\n7. credentials come only from the environment, never from release.toml, and the tool must redact anything matching a token pattern before writing its own logs\n8. the dry-run mode has to exercise every code path except the final upload, including manifest generation and signature creation, so a dry run that passes means the real run will too\n9. signing uses a detached signature stored beside the archive, and verification must be possible with nothing but the public key and the two files\n10. the tool must refuse to run on a dirty working tree unless an explicit allow-dirty flag is passed, and that flag must be recorded in the manifest\n11. rollback is a first-class command: given a previous release id it restores the published pointers without needing the original build machine\n12. concurrent releases of the same package must be prevented by a lock held in the artifact store itself, not by a local lockfile that a second machine cannot see\n13. the progress output must be usable in CI logs, which means no carriage-return animation and one line per completed phase with elapsed seconds\n14. network retries use exponential backoff capped at sixty seconds, and the total attempt budget is configurable per phase rather than globally\n15. the manifest schema is versioned, and readers must reject a manifest whose major version they do not recognise instead of ignoring unknown fields\n16. the tool must emit a machine-readable summary on stdout and keep all human-oriented narration on stderr, so a caller can pipe one without filtering the other\n17. release notes support an optional migration section, and if any commit trailer declares a breaking change the section becomes mandatory and the release fails without it\n18. the artifact store layout must be content-addressed under a per-package prefix, so that garbage collection can be implemented later without moving anything\n19. timestamps in every output are UTC and ISO-8601 with an explicit offset, because past incidents were made unreadable by mixed local times across build machines\n20. the tool must verify free disk space before starting the packaging phase and fail early with the required and available numbers rather than dying halfway through\n21. each phase writes a structured event to a jsonl audit file, and that file is uploaded alongside the artifacts so a failed release can be reconstructed afterwards\n22. the configuration loader must support per-environment overlays, where the overlay can only narrow settings and is forbidden from introducing keys the base file never declared\n23. when the upload target rejects an archive the tool must preserve the local copy and print the exact path, because rebuilding a two gigabyte archive costs twenty minutes\n24. the exit code space is fixed and documented: configuration errors, verification failures, network failures, and internal errors each get a distinct code that never changes"
+            }
+          ],
+          "expect": {
+            "context_pressure": {
+              "reductions_at_least": 8
+            }
+          }
         }
       ]
     }

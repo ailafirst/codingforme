@@ -306,6 +306,18 @@ def test_default_harness_matches_the_previously_inlined_assembly(tmp_path):
         # 受限编排默认关：开着它跑出来的数据和关着跑出来的不可比，
         # 所以它是一个要显式打开的变体（`plan_tool`），不是默认能力。
         "plan_tool": False,
+        "delegate_tool": False,
+        # 这七个是消融开关，默认开——关掉才是变体（`no_tool_output_spill` /
+        # `no_window_block` / `no_graded_compression` / `no_session_summary` /
+        # `no_stale_read` / `no_clear_at_least` / `no_reversible_squeeze`）。
+        # 写在这里是为了「默认变体等于机制全开」这句话有一处会失败的断言兜着。
+        "tool_output_spill": True,
+        "recent_window_block": True,
+        "graded_compression": True,
+        "session_summary": True,
+        "stale_read_invalidation": True,
+        "clear_at_least": True,
+        "reversible_squeeze": True,
     }
     assert "run_plan" not in agent.tools
 
@@ -379,6 +391,27 @@ def test_harness_applies_context_budget_overrides(tmp_path):
 
     assert agent.context_manager.total_budget == 900
     assert agent.context_manager.section_budgets["history"] == 120
+
+
+def test_a_window_tier_variant_moves_the_whole_derivation_chain(tmp_path):
+    """`context_window` 走 `set_context_window()`，不是只改那个总数。
+
+    和 `total_budget` 的区别就在这里：直接写 `total_budget` 会让
+    `context_window_tokens` / `context_budget_breakdown` 停留在探测出来的旧值，
+    工件上两者对不上；而单条工具结果上限、计划转录上限都是从预算派生的，
+    降档如果不带着它们一起走，等于只换了闸门、没换任何一道入口上限。
+    """
+    build_workspace(tmp_path)
+
+    small = get_harness("window_16k").build(FakeModelClient([]), tmp_path)
+    large = get_harness("window_32k").build(FakeModelClient([]), tmp_path)
+
+    assert (small.context_window, large.context_window) == (16_000, 32_000)
+    # 预算、单条上限、breakdown 三者必须同时跟着走
+    assert small.context_manager.total_budget < large.context_manager.total_budget
+    assert small.tool_output_limit() < large.tool_output_limit()
+    assert small.context_budget_breakdown["window_tokens"] == 16_000
+    assert large.context_budget_breakdown["window_tokens"] == 32_000
 
 
 def test_builtin_variants_have_distinct_fingerprints():

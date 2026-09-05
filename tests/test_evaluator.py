@@ -22,7 +22,7 @@ def test_load_benchmark_validates_fixed_schema():
     benchmark = load_benchmark(Path("benchmarks/coding_tasks.json"))
 
     assert benchmark["schema_version"] == 2
-    assert len(benchmark["tasks"]) == 14
+    assert len(benchmark["tasks"]) == 15
     assert Counter(task["category"] for task in benchmark["tasks"]) == {
         "documentation": 2,
         "text-edit": 2,
@@ -32,6 +32,11 @@ def test_load_benchmark_validates_fixed_schema():
         # fan-out：先把 8 个模块都读一遍，再改其中少数几个。加这一类是因为
         # 另外 12 个任务全是串行（读一个改一个），结构上量不出受限编排的收益。
         "fan-out": 2,
+        # long-context：单条工具结果必然超过 `tool_output_limit()` 的任务。加它是因为
+        # 其余 14 个任务的 fixture 加起来只有 477 个 token，而 1M 档下单条上限是
+        # 14,810——落盘/指针/窗口推进那整套机制在常规跑批里一次都触发不了，
+        # 于是「机制生效了」和「一次都没跑起来」在工件上长得一模一样。
+        "long-context": 1,
     }
     for task in benchmark["tasks"]:
         assert {
@@ -116,12 +121,12 @@ def test_run_fixed_benchmark_reports_metadata_and_success_definition(tmp_path):
     # 数字必须自己声明它测的是什么：这批任务是回放参考解跑出来的，不是被测系统自己解的。
     assert artifact["execution_mode"] == "oracle-replay"
     assert artifact["summary"] == {
-        "total_tasks": 14,
-        "passed": 14,
+        "total_tasks": 15,
+        "passed": 15,
         "failed": 0,
         "pass_rate": 1.0,
-        "within_budget": 14,
-        "verifier_passes": 14,
+        "within_budget": 15,
+        "verifier_passes": 15,
         "within_budget_rate": 1.0,
         "verifier_pass_rate": 1.0,
         "failure_category_counts": {},
@@ -194,7 +199,7 @@ def test_run_harness_regression_v2_writes_named_artifact(tmp_path):
     )
 
     assert artifact_path.exists()
-    assert artifact["summary"]["total_tasks"] == 14
+    assert artifact["summary"]["total_tasks"] == 15
     assert artifact["summary"]["pass_rate"] == 1.0
     assert artifact["summary"]["within_budget_rate"] == 1.0
     assert artifact["summary"]["verifier_pass_rate"] == 1.0
@@ -267,13 +272,26 @@ def test_every_content_target_the_model_must_produce_appears_in_the_prompt():
 
     只查 `file_contains`：`file_not_contains` 说的是「把原有内容删掉」，
     report/trace 类判据查的是运行状态而不是模型产出，都不适用这条约束。
+
+    真正的约束是「模型有办法拿到这串字」，提示词只是最常见的那个来源。
+    `spill_pointer_recovery` 是另一个来源：那串 token 藏在工作区的日志里，任务
+    要考的就是模型能不能把它找出来——所以 `setup.marker` 也算数。放宽到「提示词
+    **或** setup 声明的内容」，而不是给这个任务开豁免：豁免会让下一个写错的任务
+    照样溜过去。
     """
     tasks = load_benchmark(Path("benchmarks/coding_tasks.json"))["tasks"]
+
+    def obtainable(task, text):
+        if text in task["prompt"]:
+            return True
+        marker = str((task.get("setup") or {}).get("marker", ""))
+        return bool(marker) and marker.split(": ", 1)[-1] in text
+
     missing = [
         (task["id"], check["text"])
         for task in tasks
         for check in task["checks"]["fail_to_pass"]
-        if check["kind"] == "file_contains" and check["text"] not in task["prompt"]
+        if check["kind"] == "file_contains" and not obtainable(task, check["text"])
     ]
     assert missing == []
 

@@ -8,9 +8,19 @@
 `tool_call_id` 的 tool 消息。** 少一条后端报错，多一条同理，顺序错了也一样。
 """
 
+import itertools
 from pathlib import Path
 
 from codingforme import CodingForMe, FakeModelClient, SessionStore, WorkspaceContext
+from codingforme.context_manager import (
+    HISTORY_POLICIES,
+    POLICY_DROPPED,
+    POLICY_SQUEEZED,
+    POLICY_STALE_POINTER,
+    POLICY_STALE_READ,
+    ContextManager,
+    spill_marker,
+)
 from codingforme.models import final_answer, tool_call
 
 
@@ -220,8 +230,11 @@ def test_a_dropped_tool_result_still_leaves_a_paired_placeholder(tmp_path):
     两个方向都是错的：少一条 tool 消息，后端直接拒请求；把 tool_call 从 assistant
     里删掉，等于告诉模型"你没调过这个"，它下一轮可能把已经做过的写操作重发一遍。
     """
-    for name in ("a.txt", "b.txt", "c.txt"):
-        (tmp_path / name).write_text(("x" * 400 + "\n"), encoding="utf-8")
+    # 内容用互不相同的词，不用一长串重复字符：预算按 token 判之后，"x"*400 只值
+    # 个位数 token，撑不爆任何预算，用例会静默失去意义。
+    for index, name in enumerate(("a.txt", "b.txt", "c.txt")):
+        body = " ".join(f"{name[0]}word{index}{n}" for n in range(80))
+        (tmp_path / name).write_text(body + "\n", encoding="utf-8")
     agent = build_agent(
         tmp_path,
         [
@@ -232,8 +245,8 @@ def test_a_dropped_tool_result_still_leaves_a_paired_placeholder(tmp_path):
         ],
     )
     # 把 history 预算压到只放得下最后一两条，逼出"结果被裁掉"这条路径。
-    agent.context_manager.section_budgets["history"] = 260
-    agent.context_manager.section_floors["history"] = 260
+    agent.context_manager.section_budgets["history"] = 90
+    agent.context_manager.section_floors["history"] = 90
 
     agent.ask("Read the three files")
 
@@ -326,7 +339,7 @@ def test_the_flat_text_view_survives_for_metrics(tmp_path):
     assert "You are coding-for-me" in prompt
     assert "Look around" in prompt
     metadata = agent.last_prompt_metadata
-    assert metadata["prompt_chars"] > 0
+    assert metadata["prompt_tokens"] > 0
     assert metadata["message_count"] == len(agent.model_client.messages[-1])
 
 
@@ -339,3 +352,142 @@ def test_the_repo_no_longer_sends_the_whole_context_as_one_user_message(tmp_path
     source = Path("codingforme/models.py").read_text(encoding="utf-8")
     assert '"messages": [{"role": "user", "content": prompt}]' not in source
     assert '"messages": to_messages(messages)' in source
+
+
+# --- 消息投影(阶段三)---------------------------------------------------------
+
+
+def _projection_history():
+    """一段刻意覆盖到全部呈现形态的历史。
+
+    形状按真实 history 造:assistant 记录带 `tool_calls`,每个调用配一条同
+    `call_id` 的 tool 记录。第二条 assistant 一轮发两个调用——一轮多调用是这套
+    配对约束最容易出错的地方。
+    """
+    return [
+        {"role": "user", "content": "start"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "c1", "name": "read_file", "args": {"path": "a.py"}}],
+        },
+        {"role": "tool", "name": "read_file", "args": {"path": "a.py"}, "content": "aaa", "call_id": "c1"},
+        {
+            "role": "assistant",
+            "content": "looked at it",
+            "tool_calls": [
+                {"id": "c2", "name": "run_shell", "args": {"command": "ls"}},
+                {"id": "c3", "name": "search", "args": {"pattern": "x"}},
+            ],
+        },
+        {"role": "tool", "name": "run_shell", "args": {"command": "ls"}, "content": "one\ntwo", "call_id": "c2"},
+        {"role": "tool", "name": "search", "args": {"pattern": "x"}, "content": "error: nope", "call_id": "c3"},
+    ]
+
+
+def test_every_policy_combination_keeps_the_tool_calls_paired(tmp_path):
+    """**任意**形态组合下,「每个 tool_call 恰好配一条同 id 的 tool 消息」都必须成立。
+
+    为什么要枚举而不是挑几个点:呈现形态从前是散在一个函数里的一串 if 分支,只能靠
+    构造出恰好触发它的历史来间接命中,谁也说不清一共有几种、哪几种能同时出现。拎成
+    一等对象之后,这条约束可以整组验——而它是这一层唯一一条「错了整个请求被后端拒掉、
+    不是降级」的约束。
+
+    第二重枚举是「哪几条活过了预算」:预算裁剪会丢掉任意一条,包括发起调用的那条
+    assistant 记录(此时孤儿工具条目要被补出它的 assistant 轮)和工具结果本身
+    (此时那个 tool_call 要拿到占位而不是被删掉)。
+    """
+    agent = build_agent(tmp_path, [])
+    manager = ContextManager(agent)
+    history = _projection_history()
+    tool_indexes = [index for index, item in enumerate(history) if item["role"] == "tool"]
+
+    # 渲染只有 (下标, 形态) 这么多种,先算好——组合数在下面,渲染不必跟着涨。
+    rendered = {
+        (index, policy): manager._render_policy(history[index], policy)
+        for index in tool_indexes
+        for policy in HISTORY_POLICIES
+    }
+
+    combinations = 0
+    for policies in itertools.product(HISTORY_POLICIES, repeat=len(tool_indexes)):
+        assigned = dict(zip(tool_indexes, policies))
+        entries = []
+        for index, item in enumerate(history):
+            policy = assigned.get(index)
+            if policy is None:
+                policy = manager._policy_for(item, index, False, {})
+            if policy == POLICY_DROPPED:
+                continue
+            entries.append(
+                {"recent": False, "lines": rendered.get((index, policy), []), "item": item, "policy": policy}
+            )
+        # 全留,以及逐条丢掉其中一条。
+        masks = [list(range(len(entries)))]
+        masks += [[j for j in range(len(entries)) if j != drop] for j in [0] for drop in range(len(entries))]
+        for mask in masks:
+            kept = [entries[j] for j in mask]
+            assert_tool_calls_are_paired(manager._history_messages(kept))
+            combinations += 1
+
+    # 组合数不固定:选中 dropped 的那些组合里条目会少一条,掩码也就少一个。
+    assert combinations >= len(HISTORY_POLICIES) ** len(tool_indexes)
+
+
+def test_every_policy_is_reachable_from_a_real_history(tmp_path):
+    """每一种形态都得有真实历史能走到它。
+
+    枚举出来的形态如果有一种永远选不中,上一条测试就是在测一个不存在的状态,而真正
+    生效的分支反倒没人查。踩过同源的坑:落盘指针那一支曾经被文件摘要那一支永久遮住,
+    `spilled_pointer_count` 在最该生效的地方恒为 0,而报告上看不出任何异常。
+    """
+    agent = build_agent(tmp_path, [])
+    manager = ContextManager(agent)
+    marker = spill_marker(".codingforme/tool_outputs/r/1-read_file.txt", 9000, total_lines=300, chunk_lines=200)
+    history = [
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "c0", "name": "read_file", "args": {"path": "a.py"}}]},
+        {"role": "user", "content": "please look"},
+        {"role": "tool", "name": "read_file", "args": {"path": "a.py"}, "content": "old", "call_id": "c0"},
+        {"role": "tool", "name": "read_file", "args": {"path": "a.py"}, "content": "new", "call_id": "c1"},
+        {"role": "tool", "name": "read_file", "args": {"path": "b.py"}, "content": "preview line" + chr(10) + marker, "call_id": "c2"},
+        {"role": "tool", "name": "search", "args": {"pattern": "x"}, "content": "error: nope", "call_id": "c3"},
+        {"role": "tool", "name": "run_shell", "args": {"command": "ls"}, "content": "one", "call_id": "c4"},
+        {"role": "tool", "name": "write_file", "args": {"path": "c.py"}, "content": "wrote", "call_id": "c5"},
+        {"role": "tool", "name": "patch_file", "args": {"path": "d.py"}, "content": "", "executed": False, "call_id": "c6"},
+        {"role": "tool", "name": "read_file", "args": {"path": "g.py"}, "content": "preview line" + chr(10) + marker, "call_id": "c8"},
+        {"role": "tool", "name": "patch_file", "args": {"path": "g.py"}, "content": "patched", "call_id": "c9", "wrote": ["g.py"]},
+        {"role": "user", "content": "and now the recent one"},
+    ]
+    agent.memory.state.setdefault("file_summaries", {})["e.py"] = {"summary": "a helper module"}
+    history.insert(8, {"role": "tool", "name": "read_file", "args": {"path": "e.py"}, "content": "e", "call_id": "c7"})
+
+    seen = {policy for _, _, policy in manager._history_policies(history, len(history) - 1)}
+
+    # 两个形态不在这一轮枚举里,各有各的结构性原因,所以下面分别单独验:
+    #
+    # - `squeezed` 不由 `_policy_for()` 选出来,它是保留循环在预算不够时叠上去的最后一档。
+    # - `stale_read` 按定义只在**最近窗口内**生效,而这段历史刻意把窗口掐到只剩最后
+    #   一条(其余形态全要求条目在窗口外)。同一段历史不可能同时满足两边。
+    expected = set(HISTORY_POLICIES) - {POLICY_SQUEEZED, POLICY_STALE_READ}
+    # b.py 的指针没被写过、g.py 的被写过 —— 两个形态因此在同一段历史里同时可达,
+    # 这正是 `stale_pointer` 该有的样子:它是 `pointer` 的一个子集,不是替代品。
+    assert POLICY_STALE_POINTER in expected
+    assert seen == expected, sorted(expected - seen)
+
+    # `stale_read`:读一个文件、然后写同一个文件,两条都留在窗口内。
+    stale_history = [
+        {"role": "tool", "name": "read_file", "args": {"path": "f.py"}, "content": "before", "call_id": "s0"},
+        {"role": "tool", "name": "write_file", "args": {"path": "f.py"}, "content": "wrote", "call_id": "s1", "wrote": ["f.py"]},
+    ]
+    stale_seen = {policy for _, _, policy in manager._history_policies(stale_history, 0)}
+    assert POLICY_STALE_READ in stale_seen
+
+    # 前面垫一段对话，好让一部分条目掉出最近窗口（压扁只作用在窗口外的条目上）。
+    padded = [{"role": "user", "content": f"filler {i} " + "x " * 40} for i in range(20)] + history
+    agent.session["history"] = padded
+    assert manager._render_history_section(9000).details["squeezed_entry_count"] == 0, "预算充裕时不该压扁"
+    # 压扁只在「全文放不下、压到 10 个 token 就放得下」那个夹缝里出现，所以扫一小段
+    # 预算而不是钉死一个数：钉死的那个值会随任何一次渲染改动失效，而这条测试要验的是
+    # 「这个形态可达」，不是「它在 600 这个预算上可达」。
+    counts = [manager._render_history_section(budget).details["squeezed_entry_count"] for budget in (200, 400, 600, 900, 1200)]
+    assert max(counts) > 0, counts

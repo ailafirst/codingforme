@@ -517,9 +517,13 @@ def test_a_runaway_transcript_is_clipped_and_the_notice_says_what_to_do():
 
     assert len(result.calls) == 6
     assert result.result_bytes == 6 * len(NOISY_BODY)
-    assert len(result.transcript_full) > plans.MAX_TRANSCRIPT_CHARS
-    assert len(result.transcript) <= plans.MAX_TRANSCRIPT_CHARS
-    assert "characters of plan output omitted" in result.transcript
+    from codingforme.models import count_tokens
+
+    # 上限的单位是 token，断言也必须按 token 量——拿字符长度去比一个 token
+    # 上限正是这次要消掉的那种混用。
+    assert count_tokens(result.transcript_full) > plans.MAX_TRANSCRIPT_TOKENS
+    assert count_tokens(result.transcript) <= plans.MAX_TRANSCRIPT_TOKENS
+    assert "tokens of plan output omitted" in result.transcript
     # 撞上截断是模型最可能学会「自己过滤」的时刻，提示必须就在这里。
     assert "use print()" in result.transcript
     # 首尾都要留：开头是最早的调用，结尾是最后的调用与失败信息。
@@ -558,7 +562,7 @@ def test_the_plan_event_records_how_much_context_was_saved(tmp_path):
     event = [e for e in trace_events(tmp_path) if e["event"] == "plan_executed"][0]
     assert event["plan_results_echoed"] is False
     assert event["plan_transcript_clipped"] is False
-    assert event["plan_result_bytes"] > event["plan_transcript_chars"]
+    assert event["plan_result_bytes"] > event["plan_transcript_tokens"]
 
 
 def test_the_examples_all_show_filtering_not_just_calling(tmp_path):
@@ -860,3 +864,23 @@ def test_the_exact_plan_the_live_model_wrote_and_got_rejected_now_validates():
     )
 
     plans.check_plan(source, {"list_files", "read_file"})
+
+
+def test_the_transcript_cap_never_falls_below_a_single_tool_result():
+    """转录的聚合上限不能小于单个工具结果的上限。
+
+    小于的话，同一次 `read_file` 放进计划里反而看得更少，`run_plan` 变成纯负收益。
+    这个坑是工具结果上限改成从 `total_budget` 派生之后新出现的:1M 档下单条能有
+    14,791，而 `MAX_TRANSCRIPT_TOKENS` 还写死在 4,000。原设计的意思是「三个工具
+    调用的额度」(12000 字符 ≈ 3 × 4000 字符)，倍数关系要跟着一起走。
+    """
+    from codingforme import plans
+    from codingforme.context_manager import tool_output_limit
+
+    for total_budget in (4335, 32000, 118335, 1_000_000):
+        single = tool_output_limit(total_budget)
+        aggregate = plans.transcript_limit(single)
+        assert aggregate >= single, (
+            f"total_budget={total_budget}: 转录上限 {aggregate} < 单条结果上限 {single}"
+        )
+        assert aggregate >= plans.MAX_TRANSCRIPT_TOKENS

@@ -12,6 +12,18 @@ from pathlib import Path
 
 from .workspace import clip, now
 
+
+# 记忆里两处长度上限，单位是 **token**——和上下文预算同一种。
+#
+# 它们限的是最终要进 prompt 的文本（笔记会被召回渲染进 relevant_memory，
+# task_summary 每轮都在 working memory 里），所以必须和预算用同一把尺子量。
+# 数值由原先的 500 / 300 字符按**笔记这种内容**实测出的比值折算，不是统一折半：
+# 笔记和 task_summary 都由模型用用户的语言写，实测中文 1.31 字符/token（中文一个字
+# 往往就是一个 token），500 ÷ 1.31 ≈ 380、300 ÷ 1.31 ≈ 230。统一折半会给 250/150，
+# 把中文笔记砍掉三分之一——而这两处限的恰恰是最可能是中文的那类文本。
+NOTE_TOKENS = 380
+TASK_SUMMARY_TOKENS = 230
+
 WORKING_FILE_LIMIT = 8
 EPISODIC_NOTE_LIMIT = 12
 FILE_SUMMARY_LIMIT = 6
@@ -294,7 +306,7 @@ def _parse_timestamp(value):
 
 def _normalize_note(note, index):
     if isinstance(note, str):
-        text = clip(note.strip(), 500)
+        text = clip(note.strip(), NOTE_TOKENS)
         return {
             "text": text,
             "tags": [],
@@ -305,7 +317,7 @@ def _normalize_note(note, index):
         }
 
     if not isinstance(note, dict):
-        text = clip(str(note).strip(), 500)
+        text = clip(str(note).strip(), NOTE_TOKENS)
         return {
             "text": text,
             "tags": [],
@@ -315,7 +327,7 @@ def _normalize_note(note, index):
             "kind": "episodic",
         }
 
-    text = clip(str(note.get("text", "")).strip(), 500)
+    text = clip(str(note.get("text", "")).strip(), NOTE_TOKENS)
     tags = [str(tag).strip() for tag in _ensure_list(note.get("tags", [])) if str(tag).strip()]
     source = str(note.get("source", "")).strip()
     created_at = str(note.get("created_at", "")).strip() or now()
@@ -344,7 +356,7 @@ def normalize_memory_state(state, workspace_root=None):
         working = {}
     working.setdefault("task_summary", "")
     working.setdefault("recent_files", [])
-    working["task_summary"] = clip(str(working.get("task_summary", "")).strip(), 300)
+    working["task_summary"] = clip(str(working.get("task_summary", "")).strip(), TASK_SUMMARY_TOKENS)
     working["recent_files"] = _dedupe_preserve_order(
         [
             canonicalize_path(path, workspace_root)
@@ -355,7 +367,7 @@ def normalize_memory_state(state, workspace_root=None):
     state["working"] = working
 
     if not str(working["task_summary"]).strip() and state.get("task"):
-        working["task_summary"] = clip(str(state.get("task", "")).strip(), 300)
+        working["task_summary"] = clip(str(state.get("task", "")).strip(), TASK_SUMMARY_TOKENS)
     if not working["recent_files"] and state.get("files"):
         working["recent_files"] = _dedupe_preserve_order(
             [
@@ -392,12 +404,12 @@ def normalize_memory_state(state, workspace_root=None):
     for path, summary in file_summaries.items():
         path = canonicalize_path(path, workspace_root)
         if isinstance(summary, dict):
-            text = clip(str(summary.get("summary", "")).strip(), 500)
+            text = clip(str(summary.get("summary", "")).strip(), NOTE_TOKENS)
             created_at = str(summary.get("created_at", "")).strip() or now()
             freshness = summary.get("freshness")
             freshness = None if freshness in (None, "") else str(freshness).strip() or None
         else:
-            text = clip(str(summary).strip(), 500)
+            text = clip(str(summary).strip(), NOTE_TOKENS)
             created_at = now()
             freshness = None
         if not path or not text:
@@ -426,7 +438,7 @@ def normalize_memory_state(state, workspace_root=None):
 
 def set_task_summary(state, summary, workspace_root=None):
     state = normalize_memory_state(state, workspace_root)
-    state["working"]["task_summary"] = clip(str(summary).strip(), 300)
+    state["working"]["task_summary"] = clip(str(summary).strip(), TASK_SUMMARY_TOKENS)
     state["task"] = state["working"]["task_summary"]
     return state
 
@@ -445,7 +457,7 @@ def remember_file(state, path, workspace_root=None):
 
 def append_note(state, text, tags=(), source="", created_at=None, workspace_root=None, kind="episodic"):
     state = normalize_memory_state(state, workspace_root)
-    text = clip(str(text).strip(), 500)
+    text = clip(str(text).strip(), NOTE_TOKENS)
     if not text:
         return state
 
@@ -470,7 +482,7 @@ def append_note(state, text, tags=(), source="", created_at=None, workspace_root
 def set_file_summary(state, path, summary, workspace_root=None):
     state = normalize_memory_state(state, workspace_root)
     path = canonicalize_path(path, workspace_root).strip()
-    summary = clip(str(summary).strip(), 500)
+    summary = clip(str(summary).strip(), NOTE_TOKENS)
     if not path or not summary:
         return state
     state["file_summaries"][path] = {

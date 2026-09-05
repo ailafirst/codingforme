@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from . import context_manager
 from . import memory as memorylib
 from .eval.checks import (
     CheckContext,
@@ -64,6 +65,7 @@ TASK_FIXTURE_ARTIFACTS = {
     # fan-out 任务改的是 src/ 下的模块；产物取那三个里最先被改的一个即可——
     # 这个映射只用来判「产物存在」，逐文件的判定在 checks 里。
     "bench_repo_survey": "src/pool.py",
+    "bench_repo_spill": "notes.md",
 }
 
 # 每个任务的**参考解**（reference solution），对齐 Terminal-Bench 任务四件套里的
@@ -200,6 +202,59 @@ ORACLE_SOLUTIONS = {
             new_text='# SPDX: internal\n# largest module\n"""Encode and decode the sample wire format.',
         ),
         final_answer("src/codec.py is the longest module at 21 lines."),
+    ],
+    # 唯一一个单条工具结果必然超过 `tool_output_limit()` 的任务：整份读 4000 行日志
+    # 会落盘，回给模型的只有预览 + 指针。
+    #
+    # **标记行在第 3877 行，即预览段之外，这是刻意的。** 它一度被放在第 12 行（预览
+    # 段留的是头部，所以那个位置在每个档位上都读得到），理由是 8k 兜底档下预览额度
+    # 只有约 1,280 token ≈ 31 行、照指针分段读回去要一百多次。那个理由对**这个基准**
+    # 不成立：live 跑批解析到的是 1M 档（`context_window_source: known-model`），预算
+    # 118,487 → 单条上限 14,810 ≈ 370 行，分段读回去是个位数次。而放在第 12 行的代价
+    # 是任务测不到它存在的理由——实测那一版模型第一轮就发
+    # `read_file(start=1, end=100)`，`tool_output_full_tokens` 为 0，落盘门槛一次都没
+    # 够着，提示词里那句 "near the top of the file" 等于明示可以窄读。
+    #
+    # 移到深处之后这个任务同时喂两条断言：`answer_evidence_in_context`（它的 docstring
+    # 讲的就是「第 3,877 行那个 AUDIT-TOKEN 没进 prompt 而 L1 全绿」这个洞）和落盘/指针
+    # 本身。
+    #
+    # **「它需要大窗口」这个猜测是错的,实测方向相反。** 三个档位各跑一次 live:
+    # 128k 挂(16 步用光)、**32k 过(12 步)**、16k 挂(判据未通过)。原因在
+    # `tool_output_limit()`:128k 档下它是 14,810,模型一次读 400 行(约 15k token)
+    # 正好卡在门槛附近、时过时不过,拿不到指针就只能盲扫;32k 档下它是 3,410,整份读
+    # 必然落盘,指针把总行数和一句可照抄的 `read_file(start,end)` 交到模型手里,它
+    # 12 步就收敛。16k 档(上限 1,510)则是预览太短、分段太多,步数不够。
+    # 所以这个任务的可解区间是**中间档**,不是「越大越好」。
+    #
+    # 参考解必须走完「落盘 → 照指针分段读回去」这条路，不能只整份读一次就凭硬编码
+    # 的值作答：标记行在预览段之外，那样写出来的运行会挂 `answer_evidence_in_context`
+    # （实测确实挂了，declared 的串没进最后一轮 prompt）。那条断言挂得对——参考解答
+    # 得出来只是因为答案写死在脚本里。所以这里补上第二次读，它同时也是这个任务想让
+    # 模型学会的那条路径。**但回放依然证明不了任务对模型可解**（参考解知道该读哪一
+    # 段），改完必须 live 跑一次。
+    "long_log_audit_token": [
+        tool_call("read_file", path="logs/server.log", start=1, end=4000),
+        # 上一步超了 `tool_output_limit()`，回来的是预览 + 指针（指针里带着总行数）。
+        # 照它把标记所在的那一段读回来，证据才真的进上下文。
+        #
+        # 范围只取 16 行，不是 100 行——**回放和 live 跑在不同的档位上**：回放用
+        # `FakeModelClient`，模型名解析不出来，回落到 8k 保守默认 → 预算 4,487 →
+        # 单条上限 1,320；live 解析到 1M → 118,487 → 14,810。实测 100 行这种日志是
+        # 3,938 token，在 8k 档下**它自己又会落一次盘**，留下的预览是那 100 行的头部
+        # （3800~3830 附近），标记行照样不在里面，`answer_evidence_in_context` 照挂。
+        # 16 行约 640 token，在两个档位上都装得下。
+        tool_call("read_file", path="logs/server.log", start=3870, end=3885),
+        # 先读 notes.md 再改它：不这么写会多挂一条 `read_before_patch`，而那条挂掉
+        # 说的是参考解脚本的毛病，不是 harness 的。
+        tool_call("read_file", path="notes.md", start=1, end=20),
+        tool_call(
+            "patch_file",
+            path="notes.md",
+            old_text="Findings go here.",
+            new_text="Findings go here.\naudit token: run-9f31c7d2-final-marker",
+        ),
+        final_answer("The audit token is run-9f31c7d2-final-marker."),
     ],
     "durable_promotion_accept": [
         final_answer(
@@ -374,6 +429,20 @@ def validate_benchmark(data, repo_root=None):
                 )
             normalized_expected_failures.append(assertion_id)
 
+        # 可选：回答所依赖的关键串。它们会被盖到 agent 上，由
+        # `_context_evidence_report()` 在组 prompt 的那一刻逐条查一遍，结果进
+        # `prompt_metadata["context_evidence"]`，L1 的 `answer_evidence_in_context`
+        # 拿它判定。不写就是不适用，不会把任务判挂。
+        evidence = task.get("context_evidence", [])
+        if not isinstance(evidence, list):
+            raise ValueError(f"benchmark task {task_id} context_evidence must be a list")
+        normalized_evidence = []
+        for item in evidence:
+            text = str(item)
+            if not text.strip():
+                raise ValueError(f"benchmark task {task_id} has an empty context_evidence entry")
+            normalized_evidence.append(text)
+
         mutable_paths = task["mutable_paths"]
         if not isinstance(mutable_paths, list):
             raise ValueError(f"benchmark task {task_id} mutable_paths must be a list")
@@ -398,6 +467,7 @@ def validate_benchmark(data, repo_root=None):
         normalized_task["checks"] = normalized_checks
         normalized_task["mutable_paths"] = normalized_mutable_paths
         normalized_task["expected_trajectory_failures"] = normalized_expected_failures
+        normalized_task["context_evidence"] = normalized_evidence
         normalized_task["category"] = str(task["category"]).strip()
         normalized_tasks.append(normalized_task)
 
@@ -477,6 +547,33 @@ def _apply_task_setup(agent, task, fixture_copy_root):
         return
 
     kind = str(setup.get("kind", "")).strip()
+    if kind == "large_file":
+        # 现场生成一个足够大的文件，而不是把它当 fixture 提交进仓库。
+        #
+        # 为什么需要这个 kind：固定基准原本 11 个 fixture 文件加起来只有 477 个
+        # token，而 1M 档下单条工具结果的上限是 14,810——相差两个数量级，于是
+        # 落盘/指针/窗口推进这套机制在常规跑批里**一次都触发不了**，
+        # 工件上「机制生效了」和「一次都没跑起来」长得一模一样。
+        # 生成而不提交：一份 45 KB 的假日志不属于源码仓库，而且它必须能随
+        # `tool_output_limit()` 调大，写死成静态文件就又一次与预算脱钩了。
+        relative = str(setup.get("path", "logs/server.log")).strip()
+        line_count = int(setup.get("lines", 4000))
+        marker_line = int(setup.get("marker_line", 3877))
+        marker = str(setup.get("marker", "AUDIT-TOKEN: run-9f31c7d2-final-marker"))
+        target = fixture_copy_root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        rows = []
+        for index in range(1, line_count + 1):
+            if index == marker_line:
+                rows.append(f"2026-04-15T04:12:07Z {marker}")
+            else:
+                rows.append(
+                    "2026-04-15T04:%02d:%02dZ INFO worker=%02d request=%06d latency_ms=%03d status=200 route=/api/v1/items"
+                    % (index % 60, (index * 7) % 60, index % 16, index, (index * 13) % 900)
+                )
+        target.write_text("\n".join(rows) + "\n", encoding="utf-8")
+        return
+
     if kind == "context_reduction":
         history_count = int(setup.get("history_count", 12))
         note_count = int(setup.get("note_count", 6))
@@ -496,12 +593,26 @@ def _apply_task_setup(agent, task, fixture_copy_root):
             )
         agent.session["memory"] = agent.memory.to_dict()
         agent.context_manager.total_budget = int(setup.get("total_budget", 900))
-        agent.context_manager.section_budgets = dict(
-            setup.get(
+        # 过滤 PROTECTED_SECTIONS：这里是直接给字段赋值，绕过了 ContextManager.__init__
+        # 里那道过滤。不挡的话，数据集写一个 prefix 额度就能让它重新被裁，而
+        # "prefix 不被裁" 是不变量。
+        agent.context_manager.section_budgets = {
+            str(key): int(value)
+            for key, value in setup.get(
                 "section_budgets",
-                {"prefix": 120, "memory": 120, "relevant_memory": 120, "history": 160},
-            )
-        )
+                {"memory": 120, "relevant_memory": 120, "history": 160},
+            ).items()
+            if str(key) not in context_manager.PROTECTED_SECTIONS
+        }
+        # 下限也能由数据集指定。加它是因为各段额度取消之后，"能不能触发裁剪"取决于
+        # 某个可裁段有没有高出它的下限——而下限现在是常量（history 720），一段只有
+        # 五百多 token 的历史永远够不着，于是想造一个"必然发生裁剪"的场景就没有旋钮了。
+        floors = setup.get("section_floors")
+        if floors:
+            agent.context_manager._section_floor_overrides = {
+                str(key): int(value) for key, value in floors.items()
+            }
+        agent.context_manager.section_floors = agent.context_manager._compute_section_floors()
         return
 
     if kind == "freshness_mismatch":
@@ -694,6 +805,7 @@ class BenchmarkEvaluator:
         # 才查得出 N-5 那种故障——声明还在、执行没了。只查调用是查不出来的：
         # 参考解本来就只调白名单内的工具，注册表放开与否，调用序列一模一样。
         agent.declared_tools_allowlist = effective_allowlist
+        agent.declared_context_evidence = list(task.get("context_evidence", []))
         _apply_task_setup(agent, task, fixture_copy_root)
 
         # P2P 基线：在 setup **之后**、agent 动手之前拍快照。
@@ -792,6 +904,7 @@ class BenchmarkEvaluator:
             # 数据集声明的「必然会挂的轨迹断言」。要随 row 一起走，L1 判分那边
             # 只拿得到 run_id，对不上任务就用不了这份声明。
             "expected_trajectory_failures": list(task.get("expected_trajectory_failures", [])),
+            "context_evidence": list(task.get("context_evidence", [])),
             "check_results": {
                 "fail_to_pass": fail_to_pass_results,
                 "pass_to_pass": pass_to_pass_results,

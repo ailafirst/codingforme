@@ -7,6 +7,7 @@ CodingForMe 就是包在模型外面的控制循环：负责组 prompt、解析�
 import json
 import os
 import re
+import shutil
 import textwrap
 import uuid
 import hashlib
@@ -16,12 +17,22 @@ from datetime import datetime
 from pathlib import Path
 
 from . import memory as memorylib
+from . import models
+from . import context_manager
 from .context_manager import ContextManager
 from .run_store import RunStore
 from .task_state import TaskState
 from . import plans
 from . import tools as toolkit
-from .workspace import IGNORED_PATH_NAMES, MAX_HISTORY, WorkspaceContext, clip, now
+from .workspace import IGNORED_PATH_NAMES, MAX_HISTORY, MAX_TOOL_OUTPUT, WorkspaceContext, clip, now
+
+# 落盘目录（`.codingforme/tool_outputs/`）的总字节上限。超过就按运行目录整个删、
+# 最旧的先删，本次运行的目录永远不删（见 `_sweep_spill_dirs()`）。
+#
+# 8 MiB 是拍的，但有尺度：一次 live 压力探针里单次运行写出 7 个文件、合计约
+# 120 KB，所以这个值大约是六十次同量级运行的量；它限的是「跑批跑久了工作区
+# 无上限地长」，不是单次运行的行为。
+SPILL_KEEP_BYTES = 8 * 1024 * 1024
 
 SENSITIVE_ENV_NAME_MARKERS = ("API_KEY", "TOKEN", "SECRET", "PASSWORD")
 REDACTED_VALUE = "<redacted>"
@@ -34,6 +45,38 @@ DEFAULT_FEATURE_FLAGS = {
     # 受限编排（run_plan）。**默认关**：它会改变模型的行为，开着跑出来的数据
     # 和关着跑出来的不可比，所以让它成为一个要显式打开的变体维度。
     "plan_tool": False,
+    # 受限委派（delegate）。**默认关**，和 plan_tool 同一个理由。它是四层上下文治理
+    # 里「不让内容进主上下文」那一层唯一的机制：整段调查在子 agent 的独立上下文里
+    # 跑完，主上下文只收到一行结论。CLI 在 `cli.build_agent()` 里显式打开。
+    "delegate_tool": False,
+    # 下面两个都**默认开**，存在只是为了能关掉做对照——机制本身的收益，只有
+    # 同一份负载跑一次开、跑一次关才量得出来。关掉时都退回到这两个机制出现
+    # 之前的行为，不是退回到某个第三种形态。
+    #
+    # tool_output_spill：关 → 超限的工具结果直接按 `clip()` 截断丢尾巴，不落盘、
+    # 不给指针（也就是阶段三 L1 之前的样子）。
+    "tool_output_spill": True,
+    # recent_window_block：关 → 最近窗口每个工具轮滑一格（block=1），也就是
+    # `RECENT_WINDOW_BLOCK` 那条注释里说的「每轮作废一次前缀缓存」的老行为。
+    "recent_window_block": True,
+    # 分级压缩：触发点 85% / 目标点 70%。关掉退回「只有 100% 一根线、超了才动手、
+    # 只裁刚好够的量」的老行为。
+    "graded_compression": True,
+    # 会话摘要（L5 便宜的那一半）：压力到触发点时，把最早的一批历史条目整体换成
+    # 一份确定性摘要，并一次跳到预算的 45% 以下。关掉 → 完全不生成摘要，历史仍按
+    # 预算逐条丢弃（也就是这个机制出现之前的样子）。
+    "session_summary": True,
+    # 供给侧新鲜度：一次 read_file 之后同一个文件又被写过，那条读记录在最近窗口里
+    # 仍然是**改动前**的全文。关掉 → 照旧全文呈现，也就是这个机制出现之前的样子。
+    "stale_read_invalidation": True,
+    # 一次裁剪至少腾出预算的 1/10（`CLEAR_AT_LEAST_DIVISOR`）。关掉 → 只裁刚好够的
+    # 量，也就是这个机制出现之前的样子：下一轮几乎必然再裁一次，而每裁一次 history
+    # 就作废它之后的全部前缀缓存。
+    "clear_at_least": True,
+    # 可逆折叠（L4）：窗口外放不下的条目先压扁成 10 个 token 的残句，压不下才整条
+    # 丢弃。关掉 → 直接丢弃，只在 `Omitted context:` 那一行里留个数。两者的区别是
+    # 「模型知不知道这一轮发生过」，而在这个开关出现之前它们在工件上分不出来。
+    "reversible_squeeze": True,
 }
 # 稳定前缀的模板。`__TOOL_TEXT__` / `__WORKSPACE_TEXT__` 由 `build_prefix()` 在
 # dedent **之后**替换。
@@ -73,6 +116,7 @@ PROMPT_TEMPLATE = textwrap.dedent(
     - When you are done, reply with the answer as plain text and no tool call.
     - Never invent tool results.
     - Keep answers concise and concrete.
+    - If asked to remember/save/persist something so it survives future sessions, restate the fact as a line starting with exactly one of `Project convention:`, `Decision:`, `Dependency:`, `Preference:` (or 项目约定：/决策：/依赖：/偏好：) — only lines in that exact shape are kept long-term; a plain "I'll remember that" is not.
     __WRITE_RULE__
     - Before writing tests for existing code, read the implementation first.
     - When writing tests, match the current implementation unless the user explicitly asked you to change the code.
@@ -217,6 +261,9 @@ class CodingForMe:
         secret_env_names=None,
         feature_flags=None,
         on_token=None,
+        # 上下文窗口（token）。None 表示自动解析：已知后端表 → litellm 注册表 →
+        # 保守默认值，解析结果向下取整到档位。见 models.resolve_context_window()。
+        context_window=None,
     ):
         self.model_client = model_client
         # 可选的流式回调：传入时 model_client.complete() 会走 SSE 流式，
@@ -256,6 +303,8 @@ class CodingForMe:
         # `self.tools` 完成（见 eval/harness.py 的 HarnessSpec.build）。两者
         # 分开记是刻意的：判分器要能查出「声明了却没裁」这种漏接。
         self.declared_tools_allowlist = None
+        # 数据集声明的「回答所依赖的关键串」，由评测层盖上来，见 `_context_evidence_report()`。
+        self.declared_context_evidence = None
         # 受限编排（run_plan）与控制循环之间的三个瞬时状态。放在实例上而不是
         # 参数里，是因为它们要穿过 `run_tool()` 这层通用闸口——闸口的签名
         # `(name, args) -> str` 对所有工具一致，不该为一个工具开口子。
@@ -272,7 +321,11 @@ class CodingForMe:
         self.native_tool_calls = bool(getattr(model_client, "supports_native_tool_calls", False))
         self.prefix_state = self.build_prefix()
         self.prefix = self.prefix_state.text
-        self.context_manager = ContextManager(self)
+        # 上下文预算从窗口派生，而不是写死一个数。三项扣除都不能省，理由见
+        # models.context_budget_tokens() 与 docs/architecture/context-budget-sizing.md：
+        # 工具 schema 每轮重发且占实际输入约一半；输出预留要按实际输出算（实测
+        # 输出 token 里 66.9% 是推理过程）；安全系数留给分词器估算误差。
+        self.set_context_window(context_window)
         self.resume_state = self.evaluate_resume_state()
         self.session_path = self.session_store.save(self.session)
         self.current_task_state = None
@@ -283,6 +336,9 @@ class CodingForMe:
         self.last_durable_rejections = []
         self.last_durable_superseded = []
         self._last_tool_result_metadata = {}
+        self._last_delegate_stats = {}   # delegate 的上下文记账，由 tools.tool_delegate() 填
+        # 落盘过的超长工具结果的序号，只保证一次运行内单调递增。
+        self._spill_seq = 0
         # 有多少次工具调用是靠 parse() 的宽容标签读取捞回来的（而不是走标准
         # function-calling 接口）。健康状态下应当恒为 0，非 0 说明模型在偏离
         # 我们唯一宣传的那套协议。
@@ -324,6 +380,12 @@ class CodingForMe:
         # 会话内的 ask() 计数。存进 session 而不是进程内变量，
         # 这样 --resume 之后序号能接着涨，跨 session 的时间线不会断。
         self.session.setdefault("run_seq", 0)
+        # 会话摘要（context_manager 的阶段二）。放进 session 是为了跟着落盘、跟着
+        # resume——它记的是「history 的前 N 条已经被换成这份概述」，这个覆盖点必须
+        # 和 history 一起恢复，否则重启之后同一段内容会既在摘要里又在历史里。
+        summary = self.session.setdefault("context_summary", {})
+        if not isinstance(summary, dict):
+            self.session["context_summary"] = {}
 
     def current_runtime_identity(self):
         return {
@@ -474,6 +536,67 @@ class CodingForMe:
         payload.append({"function_specs": toolkit.to_openai_function_specs(self.tools)})
         return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
+    def tool_schema_tokens(self):
+        """`tools=` 数组本身要占多少 token——它每一轮都要原样重发。
+
+        为什么必须算进上下文预算：实测基础 6 个工具的 schema 是 4615 字符 /
+        1169 token，约占实际输入的 53%（对照同批跑批 `input_tokens` 中位 2188），
+        而它一个字符都不进 `prompt_chars`。不计它，预算就漏掉了输入的一半——
+        这是「字符/token 比最低到 0.83」那个不可能的比值的来源。
+
+        按 `tool_signature()` 缓存：注册表在一次运行里几乎不变，而计数虽然只要
+        约 1ms，也没必要每轮重做。
+        """
+        signature = self.tool_signature()
+        cached = getattr(self, "_tool_schema_tokens_cache", None)
+        if cached and cached[0] == signature:
+            return cached[1]
+        specs = toolkit.to_openai_function_specs(self.tools)
+        tokens = models.count_tokens(
+            json.dumps(specs, ensure_ascii=False), getattr(self.model_client, "model", None)
+        )
+        self._tool_schema_tokens_cache = (signature, tokens)
+        return tokens
+
+    def set_context_window(self, window_tokens=None):
+        """(重新)确定上下文窗口档位，并按它派生预算、换掉 ContextManager。
+
+        构造期调一次；REPL 的 `/context` 命令在运行中再调,所以这段必须是**幂等
+        且可重入**的——换句话说它只能读 `self` 上那些不随对话变化的东西(模型名、
+        工具注册表、max_new_tokens),不能碰 history 或 memory。
+
+        为什么值得让人手动设:自动探测对大窗口后端会给出一个不该直接用的数
+        (mimo-v2.5 官方标 1M,探测就是 1M),而 128k 之外的部分既要计费又会踩上
+        下文腐坏。档位是策略,不是模型能力,所以得留一个人工入口。
+
+        换窗口会连带换掉裁剪点,进而换掉前缀缓存认的那段公共前缀——运行中改一次
+        等于主动放弃一次缓存命中。这是刻意接受的:调档位是低频动作。
+
+        返回 `(window_tokens, source, budget_tokens)`,好让调用方直接拿去显示,
+        不必再去读三个属性。
+        """
+        self.context_window, self.context_window_source = models.resolve_context_window(
+            getattr(self.model_client, "model", None), explicit=window_tokens
+        )
+        # 四项扣除都不能省，理由见 models.budget_breakdown() 与
+        # docs/architecture/context-budget-sizing.md：工具 schema 每轮重发且占实际
+        # 输入约一半；输出预留要按实际输出算（实测输出 token 里 66.9% 是推理过程）；
+        # 消息结构开销按条数走（实测 residual ≈ 191 + 20 × 消息条数，R²=0.838）；
+        # 最后的分词器容差是唯一按比例走的一项。
+        #
+        # 逐项都留着（`context_budget_breakdown`），不只留那个总数：`/context` 要把
+        # 算式显示出来，而「窗口太小、预算已经触底」和「算出来正好是这个数」在一个
+        # 整数上分不出来。
+        self.context_budget_breakdown = models.budget_breakdown(
+            self.context_window,
+            tool_schema_tokens=self.tool_schema_tokens(),
+            output_reserve_tokens=self.max_new_tokens,
+            expected_messages=models.expected_message_count(self.max_steps),
+        )
+        self.context_budget = self.context_budget_breakdown["budget_tokens"]
+        self.context_manager = ContextManager(self, total_budget=self.context_budget)
+        return self.context_window, self.context_window_source, self.context_budget
+
     def build_prefix(self):
         tool_lines = []
         for name, tool in self.tools.items():
@@ -532,7 +655,9 @@ class CodingForMe:
             if any("=" not in toolkit.schema_field_type(field) for field in tool["schema"].values())
         ]
         required_args_rule = (
-            "- Required tool arguments must not be empty. Do not call "
+            # 措辞是「必须给全」而不是「不能为空」：`patch_file` 的 old_text 传空串是
+            # 一种**合法用法**（追加到文件末尾），说成「不能为空」会把模型从那条路上推开。
+            "- Required tool arguments must all be provided. Do not call "
             f"{_english_list(required_arg_tools)} with args={{}}.\n"
             if required_arg_tools
             else ""
@@ -600,6 +725,78 @@ class CodingForMe:
     def memory_text(self):
         return self.memory.render_memory_text()
 
+    def compact_context(self):
+        """手动压缩当前会话的上下文(`/compact` 走这里)。
+
+        自动压缩是占用率驱动的,到 85% 才动手。这个入口让用户在**它自己知道
+        「这一段结束了」的那一刻**主动压——压缩点越靠前,被作废的前缀缓存越少。
+
+        `history` 一个字节都不动:压缩改的是 `session["context_summary"]` 里的
+        覆盖点和摘要正文,也就是这份历史的**投影**。把覆盖点清零就能完整还原,
+        这正是 L4「完全可逆」这句话在手动入口上的含义。压完要落盘,否则下一次
+        resume 会拿回压缩之前的状态。
+        """
+        before_covered = self._summary_covered()
+        report = self.context_manager.compact_now()
+        if report.get("compacted"):
+            self.session_path = self.session_store.save(self.session)
+            self.emit_context_compacted("manual", before_covered)
+        return report
+
+    def _summary_covered(self):
+        """摘要当前覆盖到 history 的第几条。压缩前后各取一次就是「这次推进了几条」。"""
+        state = (self.session or {}).get("context_summary") or {}
+        return int(state.get("covered", 0) or 0)
+
+    def emit_context_compacted(self, trigger, before_covered):
+        """把一次上下文压缩写进 trace。
+
+        存在的理由:压缩改变的是**模型看得见什么**,而它此前几乎不在工件上留痕——
+        手动 `/compact` 一个字节都不写,自动那条只体现为 `prompt_built` 里
+        `context_pressure.session_summary.compactions` 这个嵌套计数。于是「这次运行的
+        上下文里为什么没有第 1 轮的规格」只能靠重算 history 去猜,而 resume 又会把
+        压缩后的状态原样接着用。
+
+        `trigger` 分 `manual` / `auto` 是刻意的:两者对同一份 session 做同一件事,但
+        调参时是相反的信号——auto 多说明触发点或预算该调,manual 多说明用户在替系统
+        判断「这一段结束了」,那是好事。
+
+        两条路径填**同一份**字段,取值全部来自 `session["context_summary"]` 这一个源,
+        不各自从自己的返回值里凑——凑出来的两种形状会让聚合代码要写两遍。
+        """
+        task_state = getattr(self, "current_task_state", None)
+        if task_state is None:
+            # 一轮都还没跑过(REPL 里刚进来就 /compact)。不为这条事件凭空开一个 run:
+            # 工件里会多出一次没有任何模型调用的「运行」,把所有按 run 求平均的
+            # 指标都算歪。
+            return None
+        state = (self.session or {}).get("context_summary") or {}
+        covered = int(state.get("covered", 0) or 0)
+        covered_tokens = int(state.get("covered_tokens", 0) or 0)
+        summary_tokens = models.count_tokens(
+            str(state.get("text", "") or ""), getattr(self.model_client, "model", None)
+        )
+        return self.emit_trace(
+            task_state,
+            "context_compacted",
+            {
+                "trigger": str(trigger),
+                "covered_entries": covered,
+                "newly_covered": max(0, covered - int(before_covered)),
+                "transcript_entries": len(self.session.get("history", []) or []),
+                "covered_tokens": covered_tokens,
+                "summary_tokens": summary_tokens,
+                # 换进去的比换掉的小多少。可能是负数——摘要比它替代的那几条还长,
+                # 那是这个机制在这份负载上帮倒忙,必须能看出来而不是被 max(0,...) 抹平。
+                "saved_tokens": covered_tokens - summary_tokens,
+                "refreshes": int(state.get("refreshes", 0) or 0),
+                # 这条事件挂在哪次运行下、那次运行当时是什么状态。手动压缩发生在
+                # 两轮之间时挂的是**上一次**运行,不说明的话读的人会以为它发生在
+                # 那次运行进行中。
+                "run_status": str(getattr(task_state, "status", "")),
+            },
+        )
+
     def history_text(self):
         history = self.session["history"]
         if not history:
@@ -617,7 +814,11 @@ class CodingForMe:
                 seen_reads.add(path)
 
             if item["role"] == "tool":
-                limit = 900 if recent else 180
+                # 单位是 token（`clip()` 已统一），由原先的字符值按转录实测的
+                # 2.07 字符/token 折算（900 ÷ 2.07 ≈ 430，180 ÷ 2.07 ≈ 87）。
+                # 最近的条目留得比早先的厚，是刻意的：下一步决策最依赖刚刚发生
+                # 的工具结果。
+                limit = 430 if recent else 87
                 lines.append(f"[tool:{item['name']}] {json.dumps(item['args'], sort_keys=True)}")
                 lines.append(clip(item["content"], limit))
             else:
@@ -626,10 +827,162 @@ class CodingForMe:
                 # 渲染出来只会是一行空的 "[assistant] "。
                 if not str(item.get("content", "")).strip():
                     continue
-                limit = 900 if recent else 220
+                limit = 430 if recent else 106
                 lines.append(f"[{item['role']}] {clip(item['content'], limit)}")
 
         return clip("\n".join(lines), MAX_HISTORY)
+
+    def tool_output_limit(self):
+        """单个工具结果进 history 时的 token 上限。
+
+        从 `total_budget` 派生（`context_manager.tool_output_limit()`），不是写死的
+        `MAX_TOOL_OUTPUT`。旧值 1320 与预算脱钩：1M 档预算 118,335 时它仍然只让一个
+        文件进来 1320 个 token，而预算空着十几万；实测把预算放大 27 倍，发出去的
+        prompt 一个 token 都不变。
+
+        `context_manager` 还没装配好时回落到 `MAX_TOOL_OUTPUT`——构造期的调用
+        （以及不带 context_manager 的测试替身）走这条路，行为与改动前一致。
+        """
+        budget = getattr(getattr(self, "context_manager", None), "total_budget", None)
+        if not budget:
+            return MAX_TOOL_OUTPUT
+        return context_manager.tool_output_limit(budget)
+
+    def spill_root(self):
+        """所有运行的落盘根目录。`read_file` 靠它认出「这是一个落盘件」。"""
+        return self.root / ".codingforme" / context_manager.SPILL_DIR_NAME
+
+    def _spill_dir(self):
+        """超长工具结果的落盘目录。
+
+        **必须在 workspace root 之下**（不是 `repo_root`）：这条路径会原样交给模型，
+        模型拿它去调 `read_file`，而所有路径都要过 `path()` 的锚定检查——落在根之外
+        的话，指针指向一个模型永远打不开的地方，等于没给。
+        """
+        run_id = Path(self.current_run_dir).name if self.current_run_dir else "adhoc"
+        return self.spill_root() / run_id
+
+    def _sweep_spill_dirs(self, keep_dir):
+        """把落盘总量压到 `SPILL_KEEP_BYTES` 之下，按运行目录整个删、最旧的先删。
+
+        为什么需要：这个目录只增不减，而**取回尝试本身还会再落一次盘**——一次
+        live 压力探针里，一次运行就写出 7 个文件。跑批跑久了它会一直长。
+
+        两条刻意的边界：
+        - **本次运行的目录永远不删**（`keep_dir`）。它里面的文件正被 history 里的
+          指针引用着，删掉就把「可恢复」变成了一句谎话。
+        - 按**运行目录**整个删，不按单文件删。同一次运行里的文件是一组互相引用的
+          证据，删一半留一半只会让指针指向一个残缺的集合。
+
+        代价要认账：老会话 resume 之后，history 里可能还留着指向已被清掉的运行
+        目录的指针，那次 `read_file` 会拿到 `error: no such file`。这是可接受的——
+        错误串会被保留在上下文里（`preserved_error_count`），模型据此回头读原文件；
+        而不清理的代价是工作区无上限地长。
+        """
+        root = self.spill_root()
+        if not root.is_dir():
+            return
+        entries = []
+        for child in root.iterdir():
+            if not child.is_dir() or child == keep_dir:
+                continue
+            try:
+                size = sum(item.stat().st_size for item in child.rglob("*") if item.is_file())
+                entries.append((child.stat().st_mtime, size, child))
+            except OSError:
+                continue
+        total = sum(size for _, size, _ in entries)
+        for _, size, child in sorted(entries):
+            if total <= SPILL_KEEP_BYTES:
+                break
+            shutil.rmtree(child, ignore_errors=True)
+            total -= size
+
+    def _store_tool_output(self, name, text):
+        """工具结果超出单条上限时全文落盘，上下文里只留预览 + 指针。
+
+        形状照抄 Claude Code 的 L1（Tool Result Budget）：**落盘不截断**，上下文里
+        留固定大小的头部预览，指针自带路径和原始大小，取回走已有的 `read_file`
+        而不新增工具。和「掉出最近窗口后清内容」的区别是时机——这里在**写进
+        history 的那一刻**就定形，以后每轮都是同一串文本；事后回改历史会把前缀
+        缓存从那个位置往后全部作废（Claude Code 为此专门写了服务端的
+        `cache_edits`，我们的后端没有）。
+
+        返回 `(放进 history 的文本, 落盘信息 dict)`；没触发时后者是空 dict。
+        任何一步失败都退回普通截断——工具结果的契约是「失败也返回字符串」，
+        落盘不成功不该把一次成功的工具调用变成异常。
+        """
+        text = str(text)
+        # 聚合型工具(`aggregates_calls`，目前只有 `run_plan`)自己管上限，这里
+        # 一律放行。两个理由:
+        # 一、它的结果是 N 个内层调用的转录，额度由 `plans.transcript_limit()`
+        #     给(= max(4000, 3 × 单条上限))。拿单条上限去卡它，那个 3 倍额度当场
+        #     作废——实测 6 次读文件的转录 3,993 token 会被砍到 1,320，同一次
+        #     `read_file` 放进计划里反而看得更少，`run_plan` 变成纯负收益。
+        #     **这个洞在落盘之前就有**(那时是直接 `clip()` 截断)，落盘只是照出来了。
+        # 二、就算按聚合上限判，落盘也是**假承诺**:传进来的已经是
+        #     `PlanResult.transcript`(裁过的那一份)，写进文件的不是全文，而指针
+        #     那句话说的是「full output」。转录自己的裁剪标记已经带了「use print()」
+        #     这条正确的下一步，再叠一条指向残缺文件的指针只会误导。
+        #     内层每个调用各自走过这条落盘路径了，真正的大输出在那一层就已经落过盘。
+        tool = self.tools.get(name) or {}
+        if tool.get("aggregates_calls"):
+            return text, {}
+        limit = self.tool_output_limit()
+        model = getattr(self.model_client, "model", None)
+        full_tokens = models.count_tokens(text, model)
+        if full_tokens <= limit:
+            return text, {}
+        # 消融开关：关掉落盘就退回这个机制出现之前的做法——直接截断丢尾巴。
+        # 放在这里（而不是函数开头）是刻意的：`full_tokens <= limit` 那条快路径
+        # 两个变体必须完全一致，否则 A/B 里连「有没有超限」都不可比。
+        if not self.feature_enabled("tool_output_spill"):
+            return clip(text, limit), {}
+        # 落盘的是工具原始输出，可能带密钥（`run_shell` 打环境变量之类），
+        # 而这个文件既进工作区又会被模型读回来。落盘工件一律先脱敏。
+        redacted = self.redact_text(text)
+        try:
+            directory = self._spill_dir()
+            directory.mkdir(parents=True, exist_ok=True)
+            self._spill_seq += 1
+            target = directory / f"{self._spill_seq:03d}-{name}.txt"
+            target.write_text(redacted, encoding="utf-8")
+            relative = target.relative_to(self.root).as_posix()
+            self._sweep_spill_dirs(directory)
+        except Exception as error:
+            # 落盘失败要在工件上留痕，不能和「结果本来就没超上限」记成同一种。
+            # 这两件事此前在 trace 里长得一模一样（`tool_output_spilled: False`、
+            # 两个 token 字段都是 0），而含义相反：一个是机制没必要跑，一个是
+            # 机制该跑却跑挂了、模型手里那份结果被截断且**不可恢复**。
+            # 踩过的坑是同一类：「机制生效了」和「机制一次都没触发」分不出来。
+            # `failed` 这个键让调用方把两者分开写，`spilled` 仍然只在真落盘时为真。
+            return clip(text, limit), {
+                "failed": True,
+                "error": f"{type(error).__name__}: {error}"[:200],
+                "full_tokens": full_tokens,
+            }
+        # 指针要给出**可以照抄的取回调用**，不能只给 token 数——`read_file` 的参数
+        # 是行号，模型换算不出来，实测 4 次取回 4 次又落一次盘。这里把换算做完：
+        # 每行平均 token = full_tokens / 行数，一段能装下的行数 = 预览额度 / 每行，
+        # 再留一成余量。`read_file` 读落盘件时不再加行号（见 tools.tool_read_file），
+        # 所以这个比例在取回时仍然成立。
+        total_lines = max(1, redacted.count("\n") + 1)
+        tokens_per_line = max(1.0, float(full_tokens) / total_lines)
+        marker = context_manager.spill_marker(relative, full_tokens, total_lines, total_lines)
+        preview_budget = max(1, limit - models.count_tokens(marker, model) - 1)
+        chunk_lines = max(1, int(preview_budget * 0.9 / tokens_per_line))
+        marker = context_manager.spill_marker(relative, full_tokens, total_lines, chunk_lines)
+        preview = models.clip_tokens(redacted, preview_budget, model, marker="")
+        return (
+            "\n".join([preview, marker]),
+            {
+                "path": relative,
+                "full_tokens": full_tokens,
+                "full_lines": total_lines,
+                "chunk_lines": chunk_lines,
+                "preview_tokens": models.count_tokens(preview, model),
+            },
+        )
 
     def feature_enabled(self, name):
         return bool(self.feature_flags.get(str(name), False))
@@ -731,11 +1084,28 @@ class CodingForMe:
         _, _, metadata = self._build_context(user_message)
         return metadata
 
+    def _context_evidence_report(self, prompt):
+        """检查这一轮 prompt 里还留着哪些「回答所依赖的关键内容」。
+
+        `declared_context_evidence` 由数据集声明、评测层盖上来（和
+        `declared_tools_allowlist` 同一个套路）；没声明就返回 `None`，判分器据此
+        判「不适用」而不是硬凑成通过。
+
+        刻意做成**子串精确匹配**：一旦引入模糊匹配，这条断言就从确定性判据退化成
+        另一个需要校准的判断，而 L1 的全部价值就在于它不需要模型当裁判。
+        """
+        declared = [str(item) for item in (self.declared_context_evidence or []) if str(item)]
+        if not declared:
+            return None
+        missing = [item for item in declared if item not in prompt]
+        return {"declared": declared, "missing": missing}
+
     def _build_context(self, user_message):
         """组一轮上下文，返回 `(messages, prompt, metadata)`。
 
         `messages` 是真正发出去的标准对话数组；`prompt` 是同一份内容压平成的
-        文本，只用于度量与 trace（预算裁剪本身也按它的字符数算）。
+        文本，只用于度量与 trace。**预算裁剪按 token 算，不按字符**——这句话
+        从前写的是「按它的字符数算」，那是混合制时期留下的，早已不成立。
         """
         refresh = self.refresh_prefix()
         self.resume_state = self.evaluate_resume_state()
@@ -744,11 +1114,25 @@ class CodingForMe:
         # 后面 trace/report 才能解释清楚：为什么这一轮 prefix 变了、缓存有没有命中。
         metadata.update(
             {
-                "prefix_chars": len(self.prefix),
-                "workspace_chars": len(self.workspace.text()),
-                "memory_chars": len(self.memory_text()),
-                "history_chars": len(self.history_text()),
-                "request_chars": len(user_message),
+                # 这里从前还落了 prefix/workspace/memory/history/request 五个
+                # `*_chars` 字段。删掉是因为单位统一到 token 之后没有任何代码再读
+                # 它们，而工件里留着一组字符数会被读成「预算就是按这个量的」——
+                # 各段的真实口径在 `sections[*].rendered_tokens` / `budget_tokens`。
+                #
+                # 窗口是从哪来的必须写进工件。预算随环境变化（换 provider、
+                # litellm 升级一次映射表）会让两次跑批不可比，而只记一个预算值
+                # 看不出它是人定的、查表查到的、还是回落到默认值的。
+                "context_window_tokens": int(getattr(self, "context_window", 0) or 0),
+                "context_window_source": str(getattr(self, "context_window_source", "") or ""),
+                # 预算是怎么算出来的,逐项落进工件。少了这一项,「预算触底」——窗口
+                # 小到扣完四笔就不够了、只好回落到 BUDGET_FLOOR_TOKENS——在任何
+                # 字段上都看不出来,而它和「预算正好是这个数」的含义完全相反。
+                #
+                # 注意这里记的是**派生出来的**预算。`HarnessSpec.total_budget` 和
+                # `evaluator._apply_task_setup()` 都能在构造之后直接改
+                # `context_manager.total_budget`,那时两者会对不上——真正生效的
+                # 是同一份 metadata 里的 `prompt_budget_tokens`,以它为准。
+                "context_budget_breakdown": dict(getattr(self, "context_budget_breakdown", {}) or {}),
                 "tool_count": len(self.tools),
                 # 注册表的**名字**，不只是个数。判分器要靠它把「声明了白名单」
                 # 和「白名单真的生效了」分开：N-5 那次故障里，任务声明
@@ -758,6 +1142,15 @@ class CodingForMe:
                 "tools_allowlist": (
                     list(self.declared_tools_allowlist) if self.declared_tools_allowlist else None
                 ),
+                # 「回答所依赖的内容,这一轮到底在不在上下文里」。
+                #
+                # 为什么必须在这里算、而不是事后从 trace 复算:trace 里**没有 prompt
+                # 原文**(只有分段计数),所以判分器根本没有可以 grep 的对象。上下文
+                # 工程的全部意义就是把对的东西放进 prompt,而在这个字段出现之前,
+                # 一次 live 压力探针里 harness 把答案所在那一行丢出了上下文、模型
+                # 因此答不出来,而**全部 L1 断言照样是绿的**——它们查的是路径没越界、
+                # 预算没超、白名单守住了,没有一条查内容还在不在。
+                "context_evidence": self._context_evidence_report(prompt),
                 "workspace_docs": len(self.workspace.project_docs),
                 "recent_commits": len(self.workspace.recent_commits),
                 "prefix_hash": self.prefix_state.hash,
@@ -1048,6 +1441,7 @@ class CodingForMe:
             self.current_turn = attempts
             self.run_store.write_task_state(task_state)
             prompt_started_at = time.monotonic()
+            summary_covered_before = self._summary_covered()
             messages, _, prompt_metadata = self._build_context(user_message)
             if attempts == 1:
                 # **只在首轮钉一次。** `task_state.resume_status` 回答的是「这次运行
@@ -1066,6 +1460,11 @@ class CodingForMe:
                     "duration_ms": int((time.monotonic() - prompt_started_at) * 1000),
                 },
             )
+            # 组上下文的过程中会话摘要推进过覆盖点 → 单独写一条事件。判据取**覆盖点
+            # 本身**,不取 `context_pressure.session_summary.compactions`:后者是这一轮
+            # 循环跑了几次,而这条事件回答的是「模型看得见的东西被换掉了多少」。
+            if self._summary_covered() > summary_covered_before:
+                self.emit_context_compacted("auto", summary_covered_before)
             if prompt_metadata.get("resume_status") == CHECKPOINT_PARTIAL_STALE_STATUS:
                 checkpoint = self.create_checkpoint(task_state, user_message, trigger="freshness_mismatch")
                 self.run_store.write_task_state(task_state)
@@ -1236,6 +1635,20 @@ class CodingForMe:
                             "content": result,
                             "call_id": call_ids[index],
                             "created_at": now(),
+                            # 这次调用实际改到了哪些文件。取的是**工作区快照前后
+                            # 的 sha256 差异**，不是 args 里的 path——三个理由：
+                            # `run_shell` 改了哪个文件在 args 里读不出来；一段
+                            # `run_plan` 在 history 里只有一条消息，内层那次
+                            # patch_file 的路径同样不在 args 里；而失败的写、或者
+                            # 写进去内容完全相同的写，args 有 path 但文件没变，
+                            # 按 args 判会把一条其实仍然新鲜的读误判成过期。
+                            #
+                            # 空列表也照写，不省略这个键：`_written_paths()` 靠
+                            # 「有没有这个键」区分「runtime 说了、就是没改」和
+                            # 「老会话没这个字段、只能从 args 猜」。
+                            "wrote": list(
+                                (self._last_tool_result_metadata or {}).get("affected_paths") or ()
+                            ),
                         }
                     )
                     self.run_store.write_task_state(task_state)
@@ -1265,7 +1678,12 @@ class CodingForMe:
                                     # transcript_chars。没有它们，真省了和没省
                                     # 在工件上长得一模一样。
                                     "plan_result_bytes": plan_result.result_bytes,
-                                    "plan_transcript_chars": len(plan_result.transcript),
+                                    # 度量按 token：转录直接进下一轮 prompt，
+                                    # 而预算按 token 判，两边同单位才对得上。
+                                    "plan_transcript_tokens": models.count_tokens(
+                                        plan_result.transcript,
+                                        getattr(self.model_client, "model", None),
+                                    ),
                                     "plan_transcript_clipped": (
                                         len(plan_result.transcript_full) > len(plan_result.transcript)
                                     ),
@@ -1406,6 +1824,10 @@ class CodingForMe:
             return result
 
         result = plans.PlanResult()
+        # 转录的聚合上限跟着工具结果上限走（原设计就是「三个工具调用的额度」）。
+        # 不跟着走的话，1M 档下单个结果能有 14,791 而整段转录仍卡在 4,000，
+        # 同一次 read_file 放进计划里反而看得更少。
+        result.transcript_limit = plans.transcript_limit(self.tool_output_limit())
         failure = ""
         try:
             result = plans.execute_plan(
@@ -1562,7 +1984,7 @@ class CodingForMe:
         before_snapshot = self.capture_workspace_snapshot() if snapshots_needed else {}
         after_snapshot = before_snapshot
         try:
-            result = clip(tool["run"](args))
+            result, spill = self._store_tool_output(name, tool["run"](args))
             after_snapshot = self.capture_workspace_snapshot() if snapshots_needed else before_snapshot
             affected_paths, diff_summary = self.diff_workspace_snapshots(before_snapshot, after_snapshot)
             workspace_changed = bool(affected_paths)
@@ -1589,6 +2011,34 @@ class CodingForMe:
                 "workspace_fingerprint": self.workspace.fingerprint(),
                 "diff_summary": diff_summary,
             }
+            # S2：落盘触发了没有，必须在工件上看得见。零值也照常写——
+            # 「一次都没触发」和「这个字段不存在」是两回事，后者会被读成没问题。
+            self._last_tool_result_metadata.update(
+                {
+                    # 真落盘才算 spilled：失败那支同样返回非空 dict（它要捎带
+                    # 失败原因和原始大小），所以这里不能只写 `bool(spill)`。
+                    "tool_output_spilled": bool(spill) and not spill.get("failed"),
+                    "tool_output_spill_failed": bool(spill.get("failed")),
+                    "tool_output_spill_error": str(spill.get("error", "")),
+                    "tool_output_spill_path": spill.get("path", ""),
+                    # 失败时这个数照样写：它说的是「本来要落盘多大一份」，
+                    # 也就是这次静默截断到底丢了多少。
+                    "tool_output_full_tokens": int(spill.get("full_tokens", 0)),
+                    # 落盘之后真正留在上下文里的量。省下多少 = full - kept,
+                    # 和 run_plan 的 `result_bytes - transcript_tokens` 同一个
+                    # 口径:没有这个差值,「真省了」和「什么都没省」在工件上
+                    # 分不出来。
+                    "tool_output_kept_tokens": int(spill.get("preview_tokens", 0)),
+                }
+            )
+            # 委派的上下文记账，由 `tools.tool_delegate()` 现算好放在这里。合并进
+            # 同一份 metadata 而不是另发一条事件：一次 delegate 就是一次工具调用，
+            # 两条事件会让同一次执行被 trace 数两遍（`run_plan` 的内层调用踩过）。
+            if name == "delegate":
+                self._last_tool_result_metadata.update(
+                    dict(getattr(self, "_last_delegate_stats", {}) or {})
+                )
+                self._last_delegate_stats = {}
             self.record_process_note_for_tool(name, self._last_tool_result_metadata)
             return result
         except Exception as exc:
@@ -1968,6 +2418,9 @@ class CodingForMe:
 
     def reset(self):
         self.session["history"] = []
+        # 摘要的覆盖点是 history 的下标，history 清空了它必须一起清——否则下一轮
+        # 会拿一个陈旧的覆盖点去切一段空历史。
+        self.session["context_summary"] = {}
         self.session["memory"].clear()
         self.session["memory"].update(memorylib.default_memory_state())
         self.memory = memorylib.LayeredMemory(self.session["memory"], workspace_root=self.root)

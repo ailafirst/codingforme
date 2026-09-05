@@ -13,6 +13,7 @@ P0 花全部力气建的三级身份在上面只用到了 session→run 一层�
 """
 
 import json
+import tempfile
 from pathlib import Path
 
 from ..models import FakeModelClient, final_answer, tool_call
@@ -130,7 +131,15 @@ def run_session_suite(
 ):
     harness = harness or DEFAULT_HARNESS
     benchmark = load_session_benchmark(benchmark_path)
-    workspace_root = Path(workspace_root) if workspace_root else Path(".codingforme") / "eval-sessions"
+    # 默认落在临时目录,不是仓库里的 `.codingforme/eval-sessions`。旧默认有两个问题,
+    # 都是踩过的:一、它嵌在本仓库内部,`workspace.py` 的快照会被悄悄放大成整个项目
+    # (`run_context.workspace_git_root` 因此恒为非空,这批数字和别的跑批不可比);
+    # 二、它跨次调用复用同一个根,`TraceIndex` 把上一次的 run 一起索引进来——连跑三个
+    # 变体会看到会话数 17 → 22 → 27 这种累加,每个变体的数字里都混着前一个变体的。
+    if workspace_root:
+        workspace_root = Path(workspace_root)
+    else:
+        workspace_root = Path(tempfile.mkdtemp(prefix="codingforme-sessions-"))
     workspace_root.mkdir(parents=True, exist_ok=True)
 
     cases = []

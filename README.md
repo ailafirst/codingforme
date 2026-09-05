@@ -53,6 +53,7 @@ CODINGFORME_OPENAI_MODEL="your-model"
 ```bash
 CODINGFORME_OPENAI_NATIVE_TOOL_CALLS=0   # 后端不吃标准 tools= 参数时关掉
 CODINGFORME_OPENAI_PROMPT_CACHE_KEY=1    # 后端认 prompt_cache_key 字段时打开
+CODINGFORME_CONTEXT_WINDOW=131072        # 后端的上下文窗口(token),自动查不到时才需要填
 ```
 
 > 用小米 MiMo?把 base 换成 `https://token-plan-cn.xiaomimimo.com/v1`、模型填 `mimo-v2.5` 就行。
@@ -69,7 +70,7 @@ uv run coding-for-me --resume latest         # 接着上次的会话
 python -m codingforme                        # 等价的模块入口
 ```
 
-进了 REPL,这几个命令随时可用:`/help` `/memory`(看它记住了什么)`/session`(会话文件在哪)`/reset`(清空重来)`/exit`。
+进了 REPL,这几个命令随时可用:`/help` `/context`(看/改上下文窗口档位)`/memory`(看它记住了什么)`/session`(会话文件在哪)`/reset`(清空重来)`/exit`。
 
 ## 想再拧几个旋钮
 
@@ -81,8 +82,20 @@ python -m codingforme                        # 等价的模块入口
 | `--temperature` | 采样温度 | `0.2` |
 | `--model` / `--base-url` | 临时换模型 / 换端点,不动 `.env` | 取自 `.env` |
 | `--resume` | 会话 id,或 `latest` | 无 |
+| `--context-window` | 后端上下文窗口(token),覆盖自动探测 | 自动 |
 
 > 回答被截断了?多半是 `--max-new-tokens` 默认 512 偏小——它是单步硬上限。写长代码时调到 `2048` 试试。
+
+> 上下文窗口一般不用管:自己会去查(已知后端表 → litellm 的模型注册表 → 保守默认 8k),
+> 查到的值向下取整到 8k/16k/32k/64k/128k/256k/512k/1M 某一档再用。只有在用一个自建的、
+> 冷门的后端、而且日志里显示回落到了默认档时,才需要手动填 `--context-window`。
+> **填大了比填小了危险**:小了只是少带点历史,大了会撞后端报错、丢掉整轮已经做完的工具执行。
+
+> 不想重启也能改:REPL 里 `/context` 看当前档位、来源和预算是怎么算出来的,
+> `/context 128k` 直接换档(`128000`、`1m` 一样认,不在档位上的值向下取整并告诉你取了)。
+> 窗口特别大的后端(比如 mimo-v2.5 官方标 1M)尤其用得上——自动探测出来的 1M
+> 不是该直接用的数,预算无论如何都会先夹到 128k 上限,再乘安全系数、扣掉工具 schema
+> 和输出预留。
 
 ---
 

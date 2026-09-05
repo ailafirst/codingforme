@@ -201,7 +201,8 @@ def test_delegate_child_is_read_only(tmp_path):
     target = tmp_path / "child-was-not-allowed.txt"
     agent = build_agent(
         tmp_path,
-        [
+        feature_flags={"delegate_tool": True},
+        outputs=[
             tool_call("delegate", task="write a file", max_steps=2),
             tool_call("write_file", path="child-was-not-allowed.txt", content="nope"),
             final_answer("child done"),
@@ -324,3 +325,155 @@ def test_refreshing_the_prefix_never_widens_the_agent_root(tmp_path):
         "快照的 repo_root 被放大到了外层仓库；delegate 的子 agent 会继承这个更宽的根"
     )
     assert "SECRET-OUTSIDE.md" not in agent.prefix, "外层仓库的文件泄进了 prefix"
+
+
+def test_the_child_agent_cannot_reach_a_tool_the_parent_is_not_allowed_to_use(tmp_path):
+    """委派不是工具白名单的旁路。
+
+    实测过的越权（这条测试就是为它补的）：父 agent 的注册表被「变体白名单 ∩ 任务
+    白名单」裁到只剩 `read_file` + `delegate`，而 `build_tool_registry()` 给子 agent
+    的是**完整**注册表。`read_only=True` 只挡得住 risky 的三个（run_shell /
+    write_file / patch_file），`search` 和 `list_files` 是 `risky=False`，照常执行——
+    子 agent 于是跑完了一次 `search`，结果还带回了父 agent 的最终答案。
+
+    而且这个越权在工件上**看不见**：子 agent 是一个独立的 run，它的
+    `declared_tools_allowlist` 从来没被设过，于是 L1 的 `tools_allowlist_respected`
+    对它返回「不适用」——漏检在报告里长得和通过一模一样。
+    """
+    from codingforme.eval.harness import HarnessSpec
+
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    # delegate 是元工具（`tools.META_TOOLS`）：它穿过白名单，因为在这次修复之后
+    # 它确实不提供任何新能力——子 agent 能调到的恰好是父注册表里已有的。
+    spec = HarnessSpec(
+        name="probe",
+        tools_allowlist=("read_file",),
+        feature_flags={"delegate_tool": True},
+    )
+    client = FakeModelClient(
+        [
+            tool_call("delegate", task="find x", max_steps=2),
+            tool_call("search", pattern="x", path="."),
+            final_answer("child done"),
+            final_answer("parent done"),
+        ]
+    )
+    agent = spec.build(model_client=client, workspace_root=str(tmp_path))
+    assert sorted(agent.tools) == ["delegate", "read_file"]
+
+    agent.ask("investigate")
+
+    stats = agent._last_tool_result_metadata
+    assert stats["delegate_child_tools"] == ["read_file"], stats["delegate_child_tools"]
+
+
+def test_delegate_reports_how_much_context_it_kept_out_of_the_parent(tmp_path):
+    """委派的全部价值是「那段调查不进主上下文」，省下多少只有这两个数之差说得清。
+
+    没有它们，「委派省了上下文」和「委派什么都没省」在工件上长得一模一样——
+    `run_plan` 和工具结果落盘那两块踩过同一个坑，这是同一个口径的第三份。
+    """
+    (tmp_path / "a.py").write_text("alpha\nbeta\n", encoding="utf-8")
+    agent = build_agent(
+        tmp_path,
+        feature_flags={"delegate_tool": True},
+        outputs=[
+            tool_call("delegate", task="read a.py", max_steps=2),
+            tool_call("read_file", path="a.py"),
+            final_answer("it says alpha"),
+            final_answer("parent done"),
+        ],
+    )
+
+    agent.ask("investigate")
+
+    stats = agent._last_tool_result_metadata
+    assert stats["delegate_child_run_id"]
+    assert stats["delegate_child_tool_steps"] == 1
+    # 子转录必须比回给父的结论大——否则这个机制没有存在的理由。
+    assert stats["delegate_child_transcript_tokens"] > stats["delegate_result_tokens"] > 0
+    assert stats["delegate_saved_tokens"] == (
+        stats["delegate_child_transcript_tokens"] - stats["delegate_result_tokens"]
+    )
+
+
+def test_the_child_agent_inherits_the_parent_ablation_switches(tmp_path, monkeypatch):
+    """消融开关和窗口档位也要传下去。
+
+    和上面那条工具集的是同一类问题：父 agent 身上的约束有三个面（工具集、开关、
+    窗口档位），子 agent 从前一个都没继承。不传开关的后果是一个
+    `no_tool_output_spill` 的变体在委派出去的那段调查里仍然开着落盘——被测的机制
+    在跑批的一部分里没被关掉，而工件上看不出来。
+    """
+    agent = build_agent(
+        tmp_path,
+        feature_flags={"delegate_tool": True, "tool_output_spill": False},
+        outputs=[
+            tool_call("delegate", task="look", max_steps=1),
+            final_answer("child done"),
+            final_answer("parent done"),
+        ],
+    )
+    children = []
+    real_init = CodingForMe.__init__
+
+    def recording_init(self, *args, **kwargs):
+        real_init(self, *args, **kwargs)
+        children.append(self)
+
+    # 父 agent 已经建好了，所以这里捕到的只会是子 agent。
+    monkeypatch.setattr(CodingForMe, "__init__", recording_init)
+
+    agent.ask("investigate")
+
+    assert children, "delegate 没有建出子 agent"
+    child = children[-1]
+    assert child.feature_enabled("tool_output_spill") is False
+    assert child.context_window == agent.context_window
+
+
+def test_a_child_that_ran_out_of_steps_says_so_instead_of_looking_finished(tmp_path):
+    """子 agent 撞步数上限时，回给父 agent 的那句话必须自己声明「没做完」。
+
+    实测缺陷（这条测试就是为它补的）：一次 15 任务的 live 跑批里 5 次委派有 4 次
+    子 agent 是 `step_limit_reached` 被截停的，而返回串的形状和跑完那次完全相同
+    （都是 `delegate_result:\n...`）——父 agent 拿一份半截调查当结论继续往下推，
+    工件上也看不出差别。**静默的降级比明说的失败更糟**，和「掉出窗口的工具结果
+    要留占位」是同一条原则。
+    """
+    agent = build_agent(
+        tmp_path,
+        feature_flags={"delegate_tool": True},
+        outputs=[
+            tool_call("delegate", task="find the token", max_steps=1),
+            final_answer("done"),
+        ],
+    )
+    # 子 agent 只有 1 步预算，却被喂了「一直调工具」的输出，必然撞上限。
+    agent.model_client.outputs.insert(1, tool_call("read_file", path="README.md"))
+
+    result = agent.run_tool("delegate", {"task": "find the token", "max_steps": 1})
+
+    assert result.startswith("delegate_result (incomplete:"), result[:200]
+    assert "step_limit_reached" in result
+    assert agent._last_tool_result_metadata["delegate_child_stop_reason"] == "step_limit_reached"
+
+
+def test_a_child_that_finished_is_not_labelled_incomplete(tmp_path):
+    """反向用例：跑到终点的委派不能被打上 incomplete 标签。
+
+    没有这一条，上面那条断言可以靠「所有委派都标 incomplete」通过。
+    """
+    agent = build_agent(
+        tmp_path,
+        feature_flags={"delegate_tool": True},
+        outputs=[
+            final_answer("the token is 42"),
+            final_answer("done"),
+        ],
+    )
+
+    result = agent.run_tool("delegate", {"task": "find the token", "max_steps": 3})
+
+    assert result.startswith("delegate_result:\n"), result[:200]
+    assert "incomplete" not in result

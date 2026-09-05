@@ -12,6 +12,7 @@ import sys
 import textwrap
 import unicodedata
 
+from . import models
 from .config import load_project_env, project_root, provider_env
 from .models import OpenAICompatibleModelClient
 from .runtime import CodingForMe, SessionStore
@@ -46,11 +47,13 @@ WELCOME_INTRO = (
     "A small local coding agent that lives inside your repo.",
     "It reads, edits, and runs code via an OpenAI-compatible model.",
 )
-WELCOME_HINT = "/help for commands · /memory · /session · /reset · /exit"
+WELCOME_HINT = "/help for commands · /context · /compact · /memory · /session · /reset · /exit"
 HELP_DETAILS = textwrap.dedent(
     """\
     Commands:
     /help    Show this help message.
+    /context Show the context window tier and budget; /context 128k sets the tier.
+    /compact Compact the transcript now instead of waiting for the pressure threshold.
     /memory  Show the agent's distilled working memory.
     /session Show the path to the saved session file.
     /reset   Clear the current session history and memory.
@@ -73,6 +76,182 @@ def _effective_model(args):
     if explicit_model:
         return explicit_model
     return provider_env("CODINGFORME_OPENAI_MODEL", ("OPENAI_MODEL",)) or DEFAULT_OPENAI_MODEL
+
+
+def _configured_context_window(args):
+    """上下文窗口的显式覆盖：CLI `--context-window` 优先于 `CODINGFORME_CONTEXT_WINDOW`。
+
+    两者都没给就返回 None，交给 `models.resolve_context_window()` 去查已知后端表
+    和 litellm 注册表。优先级和 provider 那几个配置项保持一致：CLI > 环境变量 > 自动。
+    """
+    if getattr(args, "context_window", None):
+        return int(args.context_window)
+    raw = provider_env("CODINGFORME_CONTEXT_WINDOW")
+    if not raw:
+        return None
+    try:
+        return int(str(raw).strip())
+    except ValueError:
+        # 配错了不要静默当成没配——那会让人以为窗口生效了，实际回落到了默认档。
+        raise SystemExit(f"CODINGFORME_CONTEXT_WINDOW must be an integer, got: {raw!r}")
+
+
+def _format_tokens(value):
+    """把 token 数写成人能一眼读懂的形式：1000000 → 1M，128000 → 128k。"""
+    value = int(value)
+    if value >= 1_000_000 and value % 1_000_000 == 0:
+        return f"{value // 1_000_000}M"
+    if value >= 1_000 and value % 1_000 == 0:
+        return f"{value // 1_000}k"
+    return f"{value:,}"
+
+
+def _compact_report(report):
+    """`/compact` 显示什么。
+
+    推不动时也要说出**原因**,不能只回一句「没压」——「热尾就那么长、没什么可压」
+    和「这个功能被变体关掉了」对用户是两件事,前者是正常的,后者要去改配置。
+    """
+    if not report.get("compacted"):
+        return "nothing compacted: %s\n%d transcript entries, %d already covered by the summary" % (
+            report.get("reason") or "unknown reason",
+            int(report.get("entries", 0)),
+            int(report.get("covered", 0)),
+        )
+    lines = [
+        "compacted %d more transcript entries (%d of %d now covered)"
+        % (
+            int(report.get("newly_covered", 0)),
+            int(report.get("covered", 0)),
+            int(report.get("entries", 0)),
+        ),
+        "transcript %d -> %d tokens (saved %d)"
+        % (
+            int(report.get("before_tokens", 0)),
+            int(report.get("after_tokens", 0)),
+            int(report.get("saved_tokens", 0)),
+        ),
+        # 摘要正文要给出来。压缩是**用户主动**发起的,他有权当场看到换进去的是什么;
+        # 只报一个 token 差值等于让他相信压掉的部分无关紧要。
+        "",
+        str(report.get("summary", "")).strip() or "(the summary is empty)",
+    ]
+    return "\n".join(lines)
+
+
+def _context_status(agent):
+    """`/context` 不带参数时显示什么。
+
+    四样缺一不可：窗口档位、它是怎么定下来的（explicit / known-model /
+    litellm-registry / default——不写来源就没法判断「这是我设的」还是「自动猜的」）、
+    预算算式的**逐项**扣除（只给一个总数的话，想不通「1M 的窗口为什么只剩 11 万」，
+    也不知道该去调哪一笔），以及可选档位清单（不列出来，用户就得去翻源码才知道
+    能填什么）。窗口小到扣完仍不够时还要多一行警告——触底和「预算正好是这个数」
+    含义相反。
+    """
+    window = int(getattr(agent, "context_window", 0) or 0)
+    source = str(getattr(agent, "context_window_source", "") or "unknown")
+    budget = int(getattr(agent, "context_budget", 0) or 0)
+    breakdown = dict(getattr(agent, "context_budget_breakdown", {}) or {})
+    lines = [
+        f"window     {_format_tokens(window)} tokens  (source: {source})",
+        f"budget     {budget:,} tokens for prompt assembly",
+    ]
+    if breakdown:
+        # 算式逐项写出来，不然「1M 的窗口为什么只有 10 万预算」看不出所以然，
+        # 而且四笔扣除各自该调什么也无从判断。每行保持在 60 字符以内：REPL 的
+        # 面板会硬折行，折断的数字比不显示更难读。
+        capped = int(breakdown.get("capped_tokens", 0))
+        capped_note = "  (policy cap)" if breakdown.get("window_capped") else ""
+        lines.extend(
+            [
+                f"  usable   {capped:,}{capped_note}",
+                f"  - output {int(breakdown.get('output_reserve_tokens', 0)):,}"
+                f"  (max_new_tokens)",
+                f"  - schema {int(breakdown.get('tool_schema_tokens', 0)):,}"
+                f"  (resent every turn)",
+                f"  - frames {int(breakdown.get('message_framing_tokens', 0)):,}"
+                f"  ({int(breakdown.get('expected_messages', 0))} messages)",
+                f"  - margin {int(breakdown.get('tokenizer_margin_tokens', 0)):,}"
+                f"  ({models.TOKENIZER_MARGIN_RATIO:.0%} tokenizer drift)",
+            ]
+        )
+        if breakdown.get("floored"):
+            # 触底是「这个窗口装不下」，不是「预算就是这么多」。不说出来的话，
+            # 用户会以为还有 1000 个 token 可用，而实际上扣完四笔已经是负数。
+            lines.append(
+                f"  WARNING  window too small; floored to {models.BUDGET_FLOOR_TOKENS:,}"
+            )
+    lines.extend(_context_pressure_lines(agent))
+    lines.extend(
+        [
+            "tiers      " + " ".join(_format_tokens(b) for b in models.WINDOW_BUCKETS),
+            "usage      /context 128k   (128000 and 1m work too)",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _context_pressure_lines(agent):
+    """`/context` 里「现在占了多少、离自动压缩还有多远」那一段。
+
+    加它是因为整个上下文治理里唯一给用户的手是 `/compact`,而在这之前它是**盲的**:
+    用户看得到窗口档位和预算总额,看不到自己此刻占了多少、也看不到系统会在哪个点
+    自己动手。要决定「现在该不该压」,这两个数才是判据。
+
+    还没跑过任何一轮时明说「还没有」,不显示 0%——「占用率是零」和「还没量过」在
+    同一个数字上分不出来,而后者根本不该拿来做决策。
+    """
+    manager = getattr(agent, "context_manager", None)
+    thresholds = manager.compression_thresholds() if manager is not None else {}
+    if not thresholds:
+        return []
+    budget = int(thresholds.get("budget_tokens", 0) or 0)
+    metadata = dict(getattr(agent, "last_prompt_metadata", {}) or {})
+    used = int(metadata.get("prompt_tokens") or 0)
+    if used and budget:
+        lines = ["pressure   %s / %s tokens (%.1f%%) as of the last turn"
+                 % (f"{used:,}", f"{budget:,}", 100.0 * used / budget)]
+    else:
+        lines = ["pressure   no turn has been assembled yet in this session"]
+    if thresholds.get("graded"):
+        lines.extend(
+            [
+                "  trigger  %s  (compress above this)" % f"{int(thresholds.get('trigger_tokens', 0)):,}",
+                "  target   %s  (compress down to this)" % f"{int(thresholds.get('target_tokens', 0)):,}",
+            ]
+        )
+    else:
+        # 分级被关掉时两个点都是 100%,不说出来的话「触发点 = 预算」看起来像显示错了。
+        lines.append("  trigger  %s  (graded compression is OFF: only overflow triggers)"
+                     % f"{int(thresholds.get('trigger_tokens', 0)):,}")
+    state = dict((getattr(agent, "session", {}) or {}).get("context_summary") or {})
+    entries = len((getattr(agent, "session", {}) or {}).get("history") or [])
+    covered = int(state.get("covered", 0) or 0)
+    # 摘要覆盖到哪儿,是用户判断「再敲一次 /compact 还有没有用」的唯一依据。
+    lines.append("  summary  %d of %d transcript entries covered" % (covered, entries))
+    return lines
+
+
+def _apply_context_window(agent, raw):
+    """`/context <size>`：换档位并重新派生预算。
+
+    解析失败**不改任何东西**，只回一句错误——静默回落会让人以为设生效了，
+    而实际还跑在原来的档位上，这正是 `parse_window_tokens()` 抛异常的理由。
+    """
+    try:
+        requested = models.parse_window_tokens(raw)
+    except ValueError:
+        return f"not a context window size: {raw!r} (try 128k, 128000, or 1m)"
+    window, source, budget = agent.set_context_window(requested)
+    note = ""
+    if window != requested:
+        # 档位是向下取整的，用户填 100k 会落到 64k。不说出来的话，他会以为设成了 100k。
+        note = f" (floored from {requested:,} to the nearest tier)"
+    return (
+        f"window     {_format_tokens(window)} tokens  (source: {source}){note}\n"
+        f"budget     {budget:,} tokens for prompt assembly"
+    )
 
 
 def _configured_secret_names(args):
@@ -385,7 +564,9 @@ def build_agent(args, on_token=None):
             approval_policy=args.approval,
             max_steps=args.max_steps,
             max_new_tokens=args.max_new_tokens,
+            context_window=_configured_context_window(args),
             secret_env_names=configured_secret_names,
+            feature_flags={"delegate_tool": True},
             on_token=on_token,
         )
     return CodingForMe(
@@ -395,7 +576,11 @@ def build_agent(args, on_token=None):
         approval_policy=args.approval,
         max_steps=args.max_steps,
         max_new_tokens=args.max_new_tokens,
+        context_window=_configured_context_window(args),
         secret_env_names=configured_secret_names,
+        # 交互式用法保留 delegate：它默认关是为了让评测跑批之间可比，不是因为
+        # 这个能力有问题。
+        feature_flags={"delegate_tool": True},
         on_token=on_token,
     )
 
@@ -425,6 +610,16 @@ def build_arg_parser():
     )
     parser.add_argument("--max-steps", type=int, default=20, help="Maximum tool/model iterations per request.")
     parser.add_argument("--max-new-tokens", type=int, default=1024, help="Maximum model output tokens per step.")
+    parser.add_argument(
+        "--context-window",
+        type=int,
+        default=None,
+        help=(
+            "Context window in tokens. Overrides auto-detection "
+            "(known-model table, then the litellm registry). "
+            "Also settable via CODINGFORME_CONTEXT_WINDOW."
+        ),
+    )
     parser.add_argument("--temperature", type=float, default=0.2, help="Sampling temperature.")
     return parser
 
@@ -487,6 +682,16 @@ def main(argv=None):
             return 0
         if user_input == "/help":
             show(HELP_DETAILS, title="/help")
+            continue
+        if user_input == "/context" or user_input.startswith("/context "):
+            argument = user_input[len("/context"):].strip()
+            if argument:
+                show(_apply_context_window(agent, argument), title="/context")
+            else:
+                show(_context_status(agent), title="/context")
+            continue
+        if user_input == "/compact":
+            show(_compact_report(agent.compact_context()), title="/compact")
             continue
         if user_input == "/memory":
             show(agent.memory_text(), title="/memory")

@@ -22,6 +22,7 @@ from pathlib import Path
 
 from ..run_store import RunStore
 from .code_signature import model_facing_code_signature, module_signatures
+from .. import context_manager
 from .. import tools as toolkit
 from ..runtime import DEFAULT_FEATURE_FLAGS, CodingForMe, SessionStore, prompt_template_signature
 from ..tools import base_tool_schema_signature
@@ -54,8 +55,19 @@ class HarnessSpec:
     # 也是「工具集是 harness 的一部分」这个观点的落点。
     tools_allowlist: tuple = None
     # context_manager 的预算覆盖（None = 用默认值）
+    # 上下文预算，单位是 **token**（从前是字符，见 context_manager 顶部与
+    # docs/architecture/context-budget-sizing.md）。None 表示不覆盖，用运行时从
+    # 窗口派生出来的值。评测要跨环境可比时应当在这里钉死一个档位——派生值会随
+    # provider 和 litellm 的映射表变化，而这个字段进指纹。
     total_budget: int = None
     section_budgets: dict = None
+    # 上下文窗口档位（None = 用自动探测的那个）。和 `total_budget` 的区别是它走
+    # `agent.set_context_window()`：整条派生链都跟着变——预算算式、单条工具结果
+    # 上限 `tool_output_limit()`、计划转录上限、`/context` 显示的那份 breakdown。
+    # 直接写 `total_budget` 只改最后那个总数，`context_window_tokens` 和
+    # `context_budget_breakdown` 仍然是探测出来的旧值，工件上两者会对不上。
+    # 值会被 `models.resolve_context_window()` 向下取整到 `WINDOW_BUCKETS` 的档位。
+    context_window: int = None
 
     def resolved_feature_flags(self):
         flags = dict(DEFAULT_FEATURE_FLAGS)
@@ -204,11 +216,27 @@ class HarnessSpec:
             # 否则发给模型的工具列表和实际注册表会对不上。
             agent.refresh_prefix(force=True)
 
+        # 顺序有讲究：换档要排在工具白名单裁剪**之后**（预算里要扣的工具 schema
+        # 大小取自裁剪后的注册表），排在 `total_budget` 覆盖**之前**（显式给的
+        # 预算应当压过从档位派生出来的那个）。
+        if self.context_window is not None:
+            agent.set_context_window(int(self.context_window))
+
         if self.total_budget is not None:
             agent.context_manager.total_budget = int(self.total_budget)
         if self.section_budgets:
+            # 过滤 PROTECTED_SECTIONS：这里直接改字段，绕过了 ContextManager.__init__
+            # 的过滤。不挡的话，一个变体只要声明 prefix 额度就能让它重新被裁，而
+            # "prefix 不被裁" 是不变量，不是默认值。
             agent.context_manager.section_budgets.update(
-                {str(key): int(value) for key, value in self.section_budgets.items()}
+                {
+                    str(key): int(value)
+                    for key, value in self.section_budgets.items()
+                    if str(key) not in context_manager.PROTECTED_SECTIONS
+                }
+            )
+            agent.context_manager.section_floors = (
+                agent.context_manager._compute_section_floors()
             )
 
         return agent
@@ -270,6 +298,58 @@ BUILTIN_HARNESS_SPECS = {
             feature_flags={"prompt_cache": False},
         ),
         HarnessSpec(
+            name="no_tool_output_spill",
+            description="关闭超限工具结果的落盘与指针：直接截断丢尾巴（阶段三 L1 之前的行为）",
+            feature_flags={"tool_output_spill": False},
+        ),
+        HarnessSpec(
+            name="no_window_block",
+            description="关闭最近窗口的按块推进：每个工具轮把边界推一格（按块推进之前的行为）",
+            feature_flags={"recent_window_block": False},
+        ),
+        # 两个窗口档位变体。加它们是因为压缩机制在 1M 档下**没有作用对象**：
+        # 三次全量 live 共 189 轮，186 轮跑在 118k 预算上，prompt 占预算的中位数
+        # 只有 0.70%、峰值 83.6%，触发过裁剪的 3 轮全部来自把预算写死成 450 的
+        # 布景任务。机制正确、有测试、真实跑批里一次都不执行——这个状态在报告里
+        # 长得和「没问题」一模一样。降档是让它有作用对象最快的办法。
+        HarnessSpec(
+            name="no_graded_compression",
+            description="关闭分级压缩：触发点回到 100%、history 丢弃边界每轮重算（分级之前的行为）",
+            feature_flags={"graded_compression": False},
+        ),
+        HarnessSpec(
+            name="no_stale_read",
+            description="关闭过期读作废：写过之后的那次 read_file 结果照旧全文呈现（供给侧新鲜度之前的行为）",
+            feature_flags={"stale_read_invalidation": False},
+        ),
+        # 下面两个补的是同一个洞:机制已经在跑,却没有对照组。没有对照组的机制,
+        # 「它有用」和「它这次没作用对象」在任何一份报告里都长得一模一样。
+        HarnessSpec(
+            name="no_clear_at_least",
+            description="关闭最小裁剪量：一次只裁刚好够的量，不再一次腾出预算的 1/10（clear_at_least 之前的行为）",
+            feature_flags={"clear_at_least": False},
+        ),
+        HarnessSpec(
+            name="no_reversible_squeeze",
+            description="关闭可逆折叠：窗口外放不下的条目直接整条丢弃，不留 10 token 的残句（L4 之前的行为）",
+            feature_flags={"reversible_squeeze": False},
+        ),
+        HarnessSpec(
+            name="no_session_summary",
+            description="关闭会话摘要：最早的历史条目按预算逐条丢弃，不换成概述（阶段二之前的行为）",
+            feature_flags={"session_summary": False},
+        ),
+        HarnessSpec(
+            name="window_32k",
+            description="上下文窗口降到 32k 档（预算 27,287 / 单条工具结果上限 3,410）",
+            context_window=32_000,
+        ),
+        HarnessSpec(
+            name="window_16k",
+            description="上下文窗口降到 16k 档（预算 12,087 / 单条工具结果上限 1,510）",
+            context_window=16_000,
+        ),
+        HarnessSpec(
             name="read_only",
             description="只读：写类工具全部被闸口挡住",
             read_only=True,
@@ -286,6 +366,18 @@ BUILTIN_HARNESS_SPECS = {
             name="plan_tool",
             description="开启受限编排 run_plan：模型可以用一小段程序把有依赖的多步调用串起来",
             feature_flags={"plan_tool": True},
+        ),
+        # 受限委派同样是**加**一个能力。它和 run_plan 的区别在于治理的层次不同：
+        # run_plan 让一批调用在**一次**模型往返里发完（省往返），delegate 让整段
+        # 调查在**另一个** agent 的上下文里跑完、主上下文只收到一行结论（省上下文）。
+        # 后者是「不让内容进来」这一层唯一的机制，也是这份基准上从来没被执行过的
+        # 那个——六批 live 跑批里 delegate 的调用数恒为 0，因为每个任务的
+        # allowed_tools 都把它裁掉了。现在它是元工具（穿过白名单，见 tools.META_TOOLS），
+        # 所以这个变体一开，14 个任务全都能用上它。
+        HarnessSpec(
+            name="delegate_tool",
+            description="开启受限委派 delegate：整段调查在子 agent 的独立上下文里跑完，主上下文只收到结论",
+            feature_flags={"delegate_tool": True},
         ),
     )
 }

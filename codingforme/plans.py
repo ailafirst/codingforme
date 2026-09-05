@@ -35,7 +35,7 @@
 `print` 出来的内容；没写则全文回显。照抄 Anthropic programmatic tool calling
 的语义（工具结果留在执行环境里，只有代码输出进上下文），做成条件触发是因为
 实测模型自发写的计划里只有不到一半带 `print`。另有一条聚合上限
-`MAX_TRANSCRIPT_CHARS`——防的是上下文被撑爆，和上面四条硬上限性质不同。
+`MAX_TRANSCRIPT_TOKENS`——防的是上下文被撑爆，和上面四条硬上限性质不同。
 过滤模式下两块内容必须**分开**而不是交织，理由见 `PlanResult.transcript_full`。
 
 ## 不做什么
@@ -66,13 +66,29 @@ MAX_STRING_CHARS = 200000
 # 一段计划**回给模型**的转录长度上限。上面四条防的是进程被挂住，这条防的是
 # 上下文被撑爆：一个 for 循环读 20 个文件，转录会原样进入下一轮 prompt，而在
 # 这条上限出现之前它完全没有聚合裁剪（单个工具输出各自受 workspace.clip 的
-# 4000 字符限制，20 个加起来就是 80000）。取 12000 ≈ 三个普通工具调用的额度：
-# 计划的价值是省模型往返，不是省下 N 倍的上下文预算；要回更多就该用 print()
-# 在计划里先过滤。
-MAX_TRANSCRIPT_CHARS = 12000
+# 单次额度限制，20 个加起来就是二十倍）。取三个普通工具调用的额度：计划的价值是
+# 省模型往返，不是省下 N 倍的上下文预算；要回更多就该用 print() 在计划里先过滤。
+#
+# **单位是 token**，和上下文预算、工具输出上限同一种。转录直接进下一轮 prompt，
+# 拿字符当上限就等于在同一条链路上摆两把尺子。数值由原先的 12000 字符按**转录里
+# 实际装的内容**实测出的比值折算：转录就是若干个工具输出拼起来，和 `MAX_TOOL_OUTPUT`
+# 同一种内容，实测 3.02 字符/token，12000 ÷ 3.02 ≈ 4000。统一折半会给 6000，等于
+# 凭空把这条聚合上限放宽 1.5 倍。
+# **这是下限。** 真正生效的是 `transcript_limit()` 从 `total_budget` 派生出来的值，
+# 由 `runtime.execute_plan()` 写进 `PlanResult.transcript_limit`。
+MAX_TRANSCRIPT_TOKENS = 4000
+# 转录能装几个「一个工具结果那么大」的东西。原设计就是这个意思——12000 字符
+# ≈ 三个普通工具调用的额度；工具结果上限跟着预算走之后，这个倍数关系要一起走，
+# 否则聚合上限会小于单个元素的上限。
+TRANSCRIPT_TOOL_RESULT_MULTIPLE = 3
 
 
-def _clip_transcript(text, limit=MAX_TRANSCRIPT_CHARS):
+def transcript_limit(tool_output_limit):
+    """一段计划的转录最多回给模型多少 token。"""
+    return max(MAX_TRANSCRIPT_TOKENS, TRANSCRIPT_TOOL_RESULT_MULTIPLE * int(tool_output_limit))
+
+
+def _clip_transcript(text, limit=MAX_TRANSCRIPT_TOKENS, model=None):
     """转录超预算时保留首尾、省略中间，并**明确告知模型**省了多少、该怎么办。
 
     为什么保留首尾而不是只砍尾巴：转录的开头是最早几个调用（模型据此知道计划
@@ -82,20 +98,26 @@ def _clip_transcript(text, limit=MAX_TRANSCRIPT_CHARS):
     省略标记里带一句 `use print()`：模型撞上截断的那一刻，正是它最可能学会
     「自己过滤」的时刻——这条提示比工具描述里的同一句话更容易被读进去。
     """
+    from .models import count_tokens, head_tail_clip_tokens
+
     text = str(text)
-    if limit <= 0 or len(text) <= limit:
-        return text if limit > 0 else ""
-    dropped = len(text) - limit
+    if limit <= 0:
+        return ""
+    total = count_tokens(text, model)
+    if total <= limit:
+        return text
+    dropped = total - limit
     marker = (
-        f"\n...[{dropped} characters of plan output omitted. "
+        f"\n...[{dropped} tokens of plan output omitted. "
         f"The limit is {limit}; use print() to return only what you need]...\n"
     )
-    if limit <= len(marker):
-        return text[:limit]
-    remaining = limit - len(marker)
-    head = remaining // 2
-    tail = remaining - head
-    return text[:head] + marker + (text[len(text) - tail :] if tail else "")
+    marker_tokens = count_tokens(marker, model)
+    if limit <= marker_tokens:
+        return head_tail_clip_tokens(text, limit, model)
+    body = head_tail_clip_tokens(text, limit - marker_tokens, model)
+    # head_tail_clip_tokens 自带一个中性的省略标记，这里换成带 print() 建议的那条：
+    # 模型撞上截断的那一刻，正是它最可能学会自己过滤的时刻。
+    return body.replace("\n...[omitted middle]\n", marker, 1)
 
 
 class PlanError(Exception):
@@ -281,6 +303,7 @@ class PlanResult:
         "ops",
         "result_bytes",
         "echo_results",
+        "transcript_limit",
     )
 
     def __init__(self):
@@ -297,11 +320,16 @@ class PlanResult:
         # 是否把每个调用的结果全文回显给模型。计划里写了 print() 就关掉——
         # 见 `_Interpreter.run_call` 的说明。
         self.echo_results = True
+        # 转录的聚合上限。默认是 `MAX_TRANSCRIPT_TOKENS`，真实运行里由
+        # `runtime.execute_plan()` 换成从 `total_budget` 派生的值——否则单个工具
+        # 结果的上限（1M 档 14,791）会超过整段转录的上限（4,000），同一次
+        # `read_file` 放进计划里反而看得更少，`run_plan` 变成纯负收益。
+        self.transcript_limit = MAX_TRANSCRIPT_TOKENS
 
     @property
     def transcript(self):
-        """回给模型的文本，**已按 MAX_TRANSCRIPT_CHARS 裁剪**。"""
-        return _clip_transcript(self.transcript_full)
+        """回给模型的文本，**已按 `transcript_limit` 裁剪**。"""
+        return _clip_transcript(self.transcript_full, self.transcript_limit)
 
     @property
     def transcript_full(self):

@@ -20,6 +20,330 @@ from litellm.types.utils import ChatCompletionMessageToolCall, Function
 
 OPENAI_COMPATIBLE_USER_AGENT = "coding-for-me/0.1"
 
+# 上下文窗口的档位。探测出来的窗口**向下取整到档**再用，不直接当预算。
+#
+# 分档的好处不是简洁，是两件更硬的事:一、`total_budget` 进 HarnessSpec 指纹,
+# 如果它由探测直接得出,换个 provider 或 litellm 升级一次映射表指纹就会变,
+# "两次跑批能不能放一起比"这条保证就没了;二、预算变 → 裁剪点变 → 前缀变 →
+# 前缀缓存全丢,而档位很少变。
+WINDOW_BUCKETS = (8_000, 16_000, 32_000, 64_000, 128_000, 256_000, 512_000, 1_000_000)
+# 查不到窗口时的保守默认值。宁可小,小了只是少带点历史,大了会撞后端 400、
+# 丢掉整轮已经做完的工具执行。
+DEFAULT_WINDOW_TOKENS = 8_000
+# 即使后端声称支持更大,也不把预算开到这个数以上。两条理由:
+#   - 上下文腐坏:Chroma 对 18 个模型的控制实验显示,百万窗口的模型在 30~40 万
+#     token 处开始明显退化,而且**不报错**,只是质量悄悄下滑;
+#   - 输入 token 是要计费的,历史无限增长意味着每轮成本线性上涨。
+# 这个数是可调的策略值,不是模型能力。
+EFFECTIVE_WINDOW_CAP_TOKENS = 128_000
+# 我们数出来的 prompt token,比后端实际计费的 input_token **少**——少掉的那部分
+# 必须从预算里预留出来,否则「还剩多少」这个判断整个是错的。
+#
+# 少在哪里:发出去的是标准 messages 数组,而 `prompt_tokens` 数的是同一份内容压平
+# 成的文本。role 字段、消息分隔符、`assistant.tool_calls` 的封装、每条 `tool` 消息
+# 上的 `tool_call_id`——这些后端都计费,压平文本里一个字都没有。
+#
+# 实测(`scripts/measure_token_accounting.py`,mimo-v2.5,23 轮真实请求,
+# prompt 828~3786 token,结果在 `artifacts/token-accounting.json`):
+#
+#   residual = input_tokens − prompt_tokens − tool_schema_tokens
+#   residual ≈ 191 + 20 × 消息条数      R² = 0.838
+#   residual ≈ 182 + 0.20 × prompt_tokens   R² = 0.396
+#
+# **两个拟合的 R² 差一倍,这就是取绝对量而不是比例的理由**:开销跟着「有几条消息」
+# 走,不跟着「prompt 有多长」走。原先那个 `BUDGET_SAFETY_RATIO = 0.8` 是乘在窗口上
+# 的比例,在 128k 档上一次扔掉 25,600 个 token 去覆盖一笔实测只有 1200 左右的开销;
+# 而在 8k 档上它又连带把 schema 和输出预留一起打了八折。方向和量级都不对。
+#
+# Claude Code 与 Codex CLI 的窗口算式同样只有绝对量的扣除(输出预留 20000、
+# 压缩缓冲 13000),没有乘性系数,见 docs/architecture/claude-code-context-research.md。
+MESSAGE_FRAMING_BASE_TOKENS = 200
+MESSAGE_FRAMING_TOKENS_PER_MESSAGE = 20
+# 一次运行最多会攒出多少条消息:开场四条(system、仓库快照、记忆、当前请求)加上
+# 每个工具步产生的一对(assistant 的调用 + tool 的结果)。实测 25 次工具调用时是
+# 54 条,`5 + 2 × 25 = 55`,对得上。
+MESSAGE_BASE_COUNT = 5
+MESSAGE_COUNT_PER_STEP = 2
+# 剩下的那点不确定性:上面那个拟合还有 16% 没解释掉,而且它是在 3786 token 以内的
+# 样本上拟合的,外推到十万量级没有验证过;分词器本身也可能和后端不是同一个。
+# 这一项**该**是比例——它防的是「按长度累积的估算误差」,和上面那笔按条数走的
+# 结构开销是两回事。5% 是拟合残差散布(±150 左右)之上的保守取值。
+TOKENIZER_MARGIN_RATIO = 0.05
+# 预算的绝对下限。触底不是「就用这个数」,而是「这个窗口配置装不下」,所以
+# `budget_breakdown()` 会把 `floored` 标出来,不静默。
+BUDGET_FLOOR_TOKENS = 1_000
+
+
+# 已知后端表。和 `resolve_capabilities()` 那份是同一个模式：litellm 的注册表覆盖的是
+# 公有云 provider，自建/小众后端天然在外面（实测 `get_model_info("mimo-v2.5")` 直接抛
+# 异常）。这里只放**官方文档写明**的窗口大小，猜不出来的不要往里加——猜大了会撞后端
+# 400、丢掉整轮已经做完的工具执行。
+KNOWN_MODEL_WINDOWS = {
+    # MiMo v2.5 官方说明为 1M 上下文窗口。
+    "mimo-v2.5": 1_000_000,
+}
+
+
+def count_tokens(text, model=None):
+    """把一段文本算成 token 数。
+
+    为什么不用字符数:后端按 token 计费和截断,而字符和 token 不是一个量。
+    实测 318 轮真实请求里,`prompt_chars / input_tokens` 的比值中位 2.06、
+    最小 0.83、最大 2.51——**相差 3 倍**。用字符表示一个 token 上限,误差本身
+    就吃掉了任何"精确设到 32k"的努力。
+
+    实现上直接用 litellm 自带的计数器,不引入 tiktoken:它已经是依赖了。
+    未知模型会回落到默认分词器,结果偏高一点(保守方向),可以接受。
+    单次调用在 5400 字符上约 1ms,相对一次约 17 秒的模型往返可以忽略。
+    """
+    text = str(text or "")
+    if not text:
+        return 0
+    try:
+        # **必须和 `clip_tokens()` 用同一个分词器**,否则「数出来多少」和「裁到多少」
+        # 对不上。踩过坑:`token_counter()` 和 `encode()` 对同一个模型名给出的结果
+        # 并不一致,中文上差到 40%——先按 encode 裁到 290 个 token,再用 token_counter
+        # 数出来只有 175,预算白白浪费掉四成。`encode` 同时也更快(1950 字符 0.19ms,
+        # token_counter 是 5400 字符 0.89ms)。
+        return len(litellm.encode(model=str(model or "gpt-4o"), text=text))
+    except Exception:
+        pass
+    try:
+        return int(litellm.token_counter(model=str(model or "gpt-4o"), text=text))
+    except Exception:
+        # 两条都不可用时退到粗估。它比字符数好,但仍然是估算,所以只当兜底。
+        return max(1, len(text) // 3)
+
+
+def _fits(text, max_tokens, model=None):
+    """`text` 的 token 数是否不超过 `max_tokens`。
+
+    快路径:一个 token 至少对应一个字符,所以字符数不超上限时 token 数必然也不超,
+    直接返回、不必真的分词。绝大多数调用(单行历史、单条笔记)都走这条路。
+    """
+    if len(text) <= max_tokens:
+        return True
+    return count_tokens(text, model) <= max_tokens
+
+
+def clip_tokens(text, max_tokens, model=None, marker=None):
+    """把文本截断到 `max_tokens` 个 token 以内,保留开头。
+
+    这是系统里**唯一**的截断原语,和 `count_tokens()` 一起构成单一单位:预算、
+    下限、各段额度、比较、截断全部按 token 算,没有任何一处再拿字符当上限。
+    此前是混合制——闸门按 token、各段额度按字符,裁剪循环得把 token 溢出折算成
+    字符再去减,那个折算没有原理可言,只是个凑数。
+
+    实现优先用 litellm 的 `encode`/`decode` 做精确截断(实测 1950 字符约 0.19ms);
+    分词器不可用时退到按字符二分逼近,结果仍然满足 token 上限,只是可能略保守。
+    """
+    text = str(text or "")
+    max_tokens = max(0, int(max_tokens))
+    if max_tokens <= 0:
+        return ""
+    if _fits(text, max_tokens, model):
+        return text
+    marker = marker if marker is not None else f"\n...[truncated to {max_tokens} tokens]"
+    # 标记本身也占 token,必须从额度里预留出来——否则「裁到 N 个 token」的结果
+    # 会是 N + 标记长度,上限就成了摆设。额度不够放标记时干脆不放标记。
+    body_tokens = max_tokens - count_tokens(marker, model)
+    if body_tokens <= 0:
+        marker, body_tokens = "", max_tokens
+    try:
+        tokens = litellm.encode(model=str(model or "gpt-4o"), text=text)
+        if len(tokens) > body_tokens:
+            text = litellm.decode(model=str(model or "gpt-4o"), tokens=tokens[:body_tokens])
+        return text + marker
+    except Exception:
+        pass
+    # 回退:按字符数二分,找到仍然满足 token 上限的最长前缀。
+    low, high = 0, len(text)
+    while low < high:
+        mid = (low + high + 1) // 2
+        if _fits(text[:mid], body_tokens, model):
+            low = mid
+        else:
+            high = mid - 1
+    return text[:low] + marker
+
+
+def head_tail_clip_tokens(text, max_tokens, model=None):
+    """保留首尾、省略中间,总量不超过 `max_tokens` 个 token。
+
+    用在当前请求自己就撑爆预算的兜底分支:请求的开头(说的是什么任务)和结尾
+    (往往是具体要求)都比中间更重要,所以两头都留。
+    """
+    text = str(text or "")
+    max_tokens = max(0, int(max_tokens))
+    if max_tokens <= 0:
+        return ""
+    if _fits(text, max_tokens, model):
+        return text
+    marker = "\n...[omitted middle]\n"
+    marker_tokens = count_tokens(marker, model)
+    remaining = max(0, max_tokens - marker_tokens)
+    if remaining <= 0:
+        return clip_tokens(text, max_tokens, model, marker="")
+    head_tokens = remaining // 2
+    tail_tokens = remaining - head_tokens
+    try:
+        tokens = litellm.encode(model=str(model or "gpt-4o"), text=text)
+        head = litellm.decode(model=str(model or "gpt-4o"), tokens=tokens[:head_tokens])
+        tail = (
+            litellm.decode(model=str(model or "gpt-4o"), tokens=tokens[len(tokens) - tail_tokens:])
+            if tail_tokens
+            else ""
+        )
+        return head + marker + tail
+    except Exception:
+        head = clip_tokens(text, head_tokens, model, marker="")
+        # 尾部同样按 token 取:从后往前二分,找到满足上限的最长后缀。
+        low, high = 0, len(text)
+        while low < high:
+            mid = (low + high + 1) // 2
+            if _fits(text[len(text) - mid:], tail_tokens, model):
+                low = mid
+            else:
+                high = mid - 1
+        return head + marker + text[len(text) - low:]
+
+
+def parse_window_tokens(raw):
+    """把用户写的窗口大小解析成 token 数,支持 `128000` / `128k` / `1m` 三种写法。
+
+    只有这一个解析器,CLI 参数、环境变量、REPL 里的 `/context` 命令共用它——
+    档位这件事本来就要人手动设(1M 窗口下自动探测出来的值远大于实际该用的),
+    多一处写法就多一处「同一个数在两个入口下含义不同」的机会。
+
+    解析不出来抛 `ValueError`,由调用方决定是退出还是提示重输。**不静默回落到
+    默认值**:那会让人以为设生效了,而实际跑在别的档位上。
+    """
+    text = str(raw or "").strip().lower().replace("_", "").replace(",", "")
+    if not text:
+        raise ValueError("empty context window")
+    multiplier = 1
+    if text.endswith("k"):
+        multiplier, text = 1_000, text[:-1]
+    elif text.endswith("m"):
+        multiplier, text = 1_000_000, text[:-1]
+    value = int(float(text) * multiplier)
+    if value <= 0:
+        raise ValueError(f"context window must be positive, got: {raw!r}")
+    return value
+
+
+def bucket_window(window_tokens):
+    """把一个窗口大小向下取整到 `WINDOW_BUCKETS` 里的档位。"""
+    window_tokens = int(window_tokens or 0)
+    usable = [bucket for bucket in WINDOW_BUCKETS if bucket <= window_tokens]
+    return usable[-1] if usable else WINDOW_BUCKETS[0]
+
+
+def resolve_context_window(model, explicit=None):
+    """决定这个模型的上下文窗口有多大,返回 `(档位, 来源)`。
+
+    四层,按可靠性排序:
+      1. **显式配置**(`--context-window` / `CODINGFORME_CONTEXT_WINDOW`)——人说了算;
+      2. **已知后端表** `KNOWN_MODEL_WINDOWS`——litellm 不认识的自建后端走这里;
+      3. **litellm 自带的模型注册表**——3364 条,主流模型全有(gpt-4o 128000、
+         claude-sonnet-4 1000000、deepseek-chat 131072);
+      4. **保守默认值**。
+
+    刻意不做的两件事:不按模型名前缀猜(v0.2.0 已经废掉过这种做法);不靠撞后端
+    400 反推(得先丢掉一整轮,代价是一个约 17 秒的往返,且各家错误文案不同)。
+
+    一个必须记住的坑:**`litellm.get_max_tokens()` 返回的是 `max_output_tokens`,
+    不是上下文窗口**。实测它对某个 32k 窗口的模型返回 4096——拿它当窗口会把预算
+    设成实际值的八分之一。要窗口只能读 `get_model_info()["max_input_tokens"]`。
+    """
+    if explicit:
+        return bucket_window(explicit), "explicit"
+    known = KNOWN_MODEL_WINDOWS.get(str(model or "").strip())
+    if known:
+        return bucket_window(known), "known-model"
+    try:
+        info = litellm.get_model_info(str(model or ""))
+        window = info.get("max_input_tokens") or info.get("max_tokens")
+        if window:
+            return bucket_window(window), "litellm-registry"
+    except Exception:
+        pass
+    return bucket_window(DEFAULT_WINDOW_TOKENS), "default"
+
+
+def expected_message_count(max_steps):
+    """一次运行预计会攒出多少条消息。用来预留每条消息的结构开销。
+
+    按上限估而不是按实际:预算在 `set_context_window()` 里一次算定,那时还不知道
+    这次会走几步;算小了会在运行到后半程时悄悄超出窗口,而超出的表现是后端 400、
+    整轮已经做完的工具执行全部丢掉。
+    """
+    return MESSAGE_BASE_COUNT + MESSAGE_COUNT_PER_STEP * max(0, int(max_steps or 0))
+
+
+def budget_breakdown(
+    window_tokens,
+    tool_schema_tokens=0,
+    output_reserve_tokens=0,
+    expected_messages=None,
+):
+    """把预算算式拆成逐项,返回一个字典。
+
+    存在的理由是「一个数说明不了问题」:`/context` 要把每一笔扣除显示出来,
+    工件要能看出预算有没有触底。只返回一个整数时,「窗口太小所以只剩下限」和
+    「算出来正好是这个数」在任何字段上都分不出来。
+
+    算式(全部是**绝对量**的扣除,只有最后一项是比例):
+
+        min(窗口, EFFECTIVE_WINDOW_CAP_TOKENS)
+          − 输出预留          `max_new_tokens`,推理 token 也吃这份额度
+          − 工具 schema       每轮原样重发,且不进 `prompt_tokens`
+          − 消息结构开销      role / 分隔符 / tool_calls 封装 / tool_call_id
+          再乘 (1 − 分词器容差)
+
+    三项扣除都不能省:
+      - **工具 schema** 每一轮都要原样重发。实测基础 6 个工具是 1313 个 token、
+        约占实际输入的一半,而它一个字符都不进 `prompt_tokens`——不扣等于预算算错一半。
+      - **输出预留**要按实际输出算,不是按期望看到的答案长度算:实测输出 token 里
+        66.9% 是推理 token(reasoning tokens,模型给出答案前的思考过程,同样计费、
+        同样吃 `max_tokens` 额度)。推理阶段被截断的表现是空 content,整轮作废。
+      - **消息结构开销**是实测出来的第三笔,见 `MESSAGE_FRAMING_TOKENS_PER_MESSAGE`
+        上方的注释;它按条数走,不按长度走。
+    """
+    window_tokens = int(window_tokens or 0)
+    capped = min(window_tokens, EFFECTIVE_WINDOW_CAP_TOKENS)
+    if expected_messages is None:
+        expected_messages = MESSAGE_BASE_COUNT
+    framing = MESSAGE_FRAMING_BASE_TOKENS + MESSAGE_FRAMING_TOKENS_PER_MESSAGE * int(expected_messages)
+    deducted = capped - int(output_reserve_tokens or 0) - int(tool_schema_tokens or 0) - framing
+    margin = int(max(0, deducted) * TOKENIZER_MARGIN_RATIO)
+    budget = deducted - margin
+    floored = budget < BUDGET_FLOOR_TOKENS
+    return {
+        "window_tokens": window_tokens,
+        "capped_tokens": capped,
+        "window_capped": window_tokens > capped,
+        "output_reserve_tokens": int(output_reserve_tokens or 0),
+        "tool_schema_tokens": int(tool_schema_tokens or 0),
+        "expected_messages": int(expected_messages),
+        "message_framing_tokens": framing,
+        "tokenizer_margin_tokens": margin,
+        # 触底意味着「这个窗口配置装不下」,不是「预算就是这么多」。调用方要么
+        # 换个大一点的档位,要么调小 max_new_tokens / max_steps。
+        "floored": floored,
+        "budget_tokens": max(BUDGET_FLOOR_TOKENS, budget),
+    }
+
+
+def context_budget_tokens(window_tokens, tool_schema_tokens=0, output_reserve_tokens=0, expected_messages=None):
+    """`budget_breakdown()` 的薄封装,只要那个数的时候用它。"""
+    return budget_breakdown(
+        window_tokens,
+        tool_schema_tokens=tool_schema_tokens,
+        output_reserve_tokens=output_reserve_tokens,
+        expected_messages=expected_messages,
+    )["budget_tokens"]
+
 
 def tool_call(name, **args):
     """脚本化一次原生工具调用，形状和真实后端返回的完全一致。

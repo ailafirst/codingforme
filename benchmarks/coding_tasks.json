@@ -391,12 +391,16 @@
         "kind": "context_reduction",
         "history_count": 12,
         "note_count": 6,
-        "total_budget": 700,
+        "total_budget": 450,
         "section_budgets": {
-          "prefix": 800,
           "memory": 800,
           "relevant_memory": 800,
           "history": 2400
+        },
+        "section_floors": {
+          "history": 100,
+          "memory": 40,
+          "relevant_memory": 40
         }
       }
     },
@@ -682,6 +686,51 @@
         ]
       },
       "category": "fan-out"
+    },
+    {
+      "id": "long_log_audit_token",
+      "prompt": "logs/server.log is a 4000-line log. Exactly one line contains 'AUDIT-TOKEN:'; its position in the file is not known in advance. Find that line's token value and write it into notes.md on a line that reads 'audit token: <value>'. Change nothing else.",
+      "fixture_repo": "tests/fixtures/bench_repo_spill",
+      "allowed_tools": [
+        "read_file",
+        "patch_file"
+      ],
+      "step_budget": 5,
+      "setup": {
+        "kind": "large_file",
+        "path": "logs/server.log",
+        "lines": 4000,
+        "marker_line": 3877,
+        "marker": "AUDIT-TOKEN: run-9f31c7d2-final-marker"
+      },
+      "expected_artifact": "notes.md records the audit token found in logs/server.log",
+      "mutable_paths": [
+        "notes.md"
+      ],
+      "context_evidence": [
+        "AUDIT-TOKEN: run-9f31c7d2-final-marker"
+      ],
+      "checks": {
+        "fail_to_pass": [
+          {
+            "kind": "file_contains",
+            "path": "notes.md",
+            "text": "audit token: run-9f31c7d2-final-marker"
+          }
+        ],
+        "pass_to_pass": [
+          {
+            "kind": "file_contains",
+            "path": "notes.md",
+            "text": "# notes"
+          },
+          {
+            "kind": "file_exists",
+            "path": "logs/server.log"
+          }
+        ]
+      },
+      "category": "long-context"
     }
   ]
 }

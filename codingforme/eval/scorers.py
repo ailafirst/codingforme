@@ -458,6 +458,39 @@ def check_read_ranges_preserved(run, harness):
     return _verdict("read_ranges_preserved", CHECK_FACTUAL, AXIS_CAPABILITY, offenders)
 
 
+def check_answer_evidence_in_context(run, harness):
+    """回答所依赖的关键内容，在**给出最终答案那一轮**必须还在上下文里。
+
+    为什么这条断言非有不可：其余全部 L1 断言查的都是 harness 的**行为**——路径没
+    越界、预算没超、白名单守住了、每个调用都有结果。没有一条查**内容**。一次 live
+    压力探针把这个洞照了出来：任务要模型报出日志第 3,877 行那个 `AUDIT-TOKEN`，
+    harness 把超长结果落了盘、只留下开头一段预览，答案所在那一行根本没进 prompt，
+    模型当然答不出来——而那次运行的 L1 断言**全绿**。上下文工程的全部意义就是把对
+    的东西放进 prompt，而在这条断言之前，「放丢了」在轨迹层完全不可见。
+
+    判据取自 `prompt_metadata["context_evidence"]`，由 `CodingForMe` 在组 prompt
+    的那一刻现算——**不能事后从 trace 复算**，因为 trace 里只有分段计数，没有
+    prompt 原文，判分器没有可以 grep 的对象。
+
+    只看最后一轮：中间轮次内容被裁掉是裁剪机制正常工作（模型还能再读回来），
+    而给出答案的那一轮缺内容，就是这次回答没有依据。数据集没声明关键串时返回
+    `None`（不适用），不硬凑成通过。
+    """
+    turns = [turn for turn in run.turns if (turn.prompt_metadata or {}).get("context_evidence")]
+    if not turns:
+        return None
+    report = turns[-1].prompt_metadata["context_evidence"]
+    missing = [str(item) for item in (report.get("missing") or [])]
+    offenders = [{"turn": turns[-1].turn, "missing": missing}] if missing else []
+    return _verdict(
+        "answer_evidence_in_context",
+        CHECK_FACTUAL,
+        AXIS_CAPABILITY,
+        offenders,
+        extra={"declared": list(report.get("declared") or [])},
+    )
+
+
 # 注册表。新增断言只需要写一个纯函数并挂在这里；顺序即报告里的呈现顺序。
 TRAJECTORY_CHECKS = (
     check_tool_exists,
@@ -473,6 +506,7 @@ TRAJECTORY_CHECKS = (
     check_no_protocol_drift,
     check_every_call_has_an_outcome,
     check_read_ranges_preserved,
+    check_answer_evidence_in_context,
 )
 
 # 每条断言判的是谁的行为。不在表里的一律按 harness 处理——漏标一条会把模型的
@@ -497,6 +531,8 @@ ASSERTION_SUBJECTS = {
     "tools_allowlist_respected": SUBJECT_HARNESS,
     "every_call_has_an_outcome": SUBJECT_HARNESS,
     "read_ranges_preserved": SUBJECT_HARNESS,
+    "answer_evidence_in_context": SUBJECT_HARNESS,
+    "context_pressure_absorbed": SUBJECT_HARNESS,
 }
 
 
@@ -752,12 +788,75 @@ def check_continuity_survives_restart(session, expectations):
     )
 
 
+def check_context_pressure_absorbed(session, expectations):
+    """上下文压力必须是被**压下去**的，不是**溢出**的。
+
+    为什么非有这条不可：`budget_reductions` 这套裁剪机制在三个窗口档位、178 个真实
+    预算轮次上一次都没触发过（L1 的工具结果落盘和 L3 的最近窗口把压力全吃掉了，
+    user/assistant 的文本是它们都碰不到的唯一成分）。「机制正确但一次都没执行」在
+    报告里长得和「没问题」一模一样——这条断言把「这个负载真的把 harness 压到动手了」
+    变成一个会挂的东西，否则哪天有人把对话缩短、或者把默认预算调大，压力探针就悄悄
+    退化成一条普通会话，而报告照样全绿。
+
+    「压到动手了」算的是**任意一级**压缩:逐段硬裁（`budget_reductions`）或者会话摘要
+    （`context_pressure.session_summary.compactions`）。只数前者会在阶段二之后变成一条
+    恒挂的断言——摘要一步就把占用率压回目标点以下，硬裁于是根本轮不到，而压缩确确实实
+    发生了。反过来，两者都为 0 才是这条断言真正要抓的那个状态。
+
+    三个条件同时成立才算通过：压缩触发的轮次不少于声明值（**确实压到了**）、
+    没有任何一轮 `prompt_over_budget`（**压住了**）、也没有任何一轮
+    `budget_floor_exhausted`（**没有压到底还不够**）。后两个是相反方向的失败：
+    一个说明闸门没拦住，一个说明可裁的都裁光了仍然放不下，应对完全不同。
+
+    数据集没声明 `context_pressure` 的会话不适用，返回 None。
+    """
+    declared = {}
+    for expect in expectations.values():
+        pressure = (expect or {}).get("context_pressure")
+        if pressure:
+            declared = dict(pressure)
+    if not declared:
+        return None
+
+    minimum = int(declared.get("reductions_at_least", 1))
+    reduced = overflowed = floored = 0
+    total = 0
+    for run in session.runs:
+        for turn in run.turns:
+            metadata = turn.prompt_metadata or {}
+            total += 1
+            pressure = metadata.get("context_pressure") or {}
+            summary = pressure.get("session_summary") or {}
+            if metadata.get("budget_reductions") or int(summary.get("compactions", 0) or 0):
+                reduced += 1
+            if metadata.get("prompt_over_budget"):
+                overflowed += 1
+            if metadata.get("budget_floor_exhausted"):
+                floored += 1
+
+    offenders = []
+    if reduced < minimum:
+        offenders.append({"reason": "pressure never reached the gate", "reduced_turns": reduced, "required": minimum})
+    if overflowed:
+        offenders.append({"reason": "prompt went over budget", "turns": overflowed})
+    if floored:
+        offenders.append({"reason": "everything was clipped to the floor and still did not fit", "turns": floored})
+    return _verdict(
+        "context_pressure_absorbed",
+        CHECK_CONSTRAINT,
+        AXIS_EFFICIENCY,
+        offenders,
+        extra={"turns": total, "reduced_turns": reduced, "required": minimum},
+    )
+
+
 SESSION_CHECKS = (
     check_session_evidence_surfaced,
     check_superseded_evidence_absent,
     check_supersede_recorded,
     check_session_timeline_reconstructable,
     check_continuity_survives_restart,
+    check_context_pressure_absorbed,
 )
 
 

@@ -62,7 +62,7 @@ def legacy_run_aggregate(index):
 
     tool_steps = [int(report.get("tool_steps", 0)) for report in reports]
     attempts = [int(report.get("attempts", 0)) for report in reports]
-    prompt_chars = [int((report.get("prompt_metadata") or {}).get("prompt_chars", 0)) for report in reports]
+    prompt_tokens = [int((report.get("prompt_metadata") or {}).get("prompt_tokens", 0)) for report in reports]
     cached_tokens = [int((report.get("prompt_metadata") or {}).get("cached_tokens", 0) or 0) for report in reports]
     cache_hits = [bool((report.get("prompt_metadata") or {}).get("cache_hit")) for report in reports]
     input_tokens = [int((report.get("prompt_metadata") or {}).get("input_tokens", 0) or 0) for report in reports]
@@ -80,7 +80,7 @@ def legacy_run_aggregate(index):
         "run_count": len(reports) if reports else len(index.runs),
         "avg_tool_steps": _safe_mean(tool_steps),
         "avg_attempts": _safe_mean(attempts),
-        "avg_prompt_chars": _safe_mean(prompt_chars),
+        "avg_prompt_tokens": _safe_mean(prompt_tokens),
         "cache_hit_rate": _safe_ratio(sum(1 for hit in cache_hits if hit), len(cache_hits)),
         "cached_token_ratio": _safe_ratio(sum(cached_tokens), sum(input_tokens)),
         "avg_cached_tokens": _safe_mean(cached_tokens),
