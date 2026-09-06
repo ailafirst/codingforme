@@ -184,8 +184,8 @@ def test_run_fixed_benchmark_covers_recovery_and_durable_contract_rows(tmp_path)
         for event in trace_events
     )
     assert durable_row["report"]["durable_rejections"] == [
-        "dependency-facts:secret_shaped",
-        "key-decisions:transient_task_state",
+        "reference:secret_shaped",
+        "project:transient_task_state",
     ]
 
 

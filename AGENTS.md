@@ -80,6 +80,35 @@ retry notices -- must be built from `agent.tools` at runtime rather than
 hard-coded. Variant and task allowlists trim the registry, so a hard-coded
 sentence can point the model at a tool it cannot call.
 
+## Durable Memory
+
+Durable memory lives in `.codingforme/memory/`: one file per memory under
+`topics/<name>.md` with a three-key frontmatter (`name`, `description`,
+`metadata`), plus a `MEMORY.md` index. The v1 layout (four closed topics, many
+notes per file) is read-only; the first write migrates the whole library after
+backing it up to `memory.bak-<timestamp>/`.
+
+Four invariants when touching `memory.py` or the promotion path in `runtime.py`:
+
+- **Retrieval scores the description, never the body.** `scoring_tokens()` sees
+  `name + description + tags` only. The name is slugified from the description
+  for the same reason — slugifying the body smuggles body keywords back into the
+  scored set through the name.
+- **Tokenization covers CJK.** `_tokenize()` adds adjacent-character bigrams for
+  CJK runs. `_subject_key()` shares it, so supersede semantics for Chinese facts
+  depend on it. ASCII keys must stay byte-identical.
+- **Truncation is never silent.** The index limit derives from the context budget
+  (`durable_index_limit()`); how many entries were dropped goes into
+  `prompt_metadata` and the report, zero included.
+- **Every write passes `reject_durable_reason()`,** including the background
+  extractor's output. The extractor writes only inside the memory directory and
+  never touches session state.
+
+Each phase has one ablation flag whose `False` state restores the exact prior
+behavior: `cjk_recall`, `durable_index_cap`, `memory_types` (on by default) and
+`memory_extractor`, `memory_consolidator` (off by default). New assertions need a
+falsification test proving the flag's off-state fails exactly those assertions.
+
 ## Testing Guidelines
 
 Add focused `pytest` coverage for behavior changes. Name test files

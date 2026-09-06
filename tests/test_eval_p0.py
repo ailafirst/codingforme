@@ -317,6 +317,14 @@ def test_default_harness_matches_the_previously_inlined_assembly(tmp_path):
         "session_summary": True,
         "stale_read_invalidation": True,
         "clear_at_least": True,
+        # 记忆层的三个消融开关默认开（`no_cjk_recall` / `no_durable_index_cap` /
+        # `no_memory_types` 是关掉它们的变体），写入器和整理器默认关——它们会改
+        # 记忆库内容，开着跑出来的数据和关着的不可比。
+        "cjk_recall": True,
+        "durable_index_cap": True,
+        "memory_types": True,
+        "memory_extractor": False,
+        "memory_consolidator": False,
         "reversible_squeeze": True,
     }
     assert "run_plan" not in agent.tools

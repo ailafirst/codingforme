@@ -509,7 +509,7 @@
           },
           {
             "kind": "file_contains",
-            "path": ".codingforme/memory/topics/project-conventions.md",
+            "path": ".codingforme/memory/MEMORY.md",
             "text": "Preserve benchmark regression artifacts under artifacts/."
           }
         ],
@@ -543,17 +543,12 @@
           {
             "kind": "report_equals",
             "field": "durable_rejections",
-            "value": [
-              "dependency-facts:secret_shaped",
-              "key-decisions:transient_task_state"
-            ]
+            "value": ["reference:secret_shaped", "project:transient_task_state"]
           },
           {
             "kind": "report_equals",
             "field": "durable_promotions",
-            "value": [
-              "project-conventions: Keep verifier outcomes stable across reruns."
-            ]
+            "value": ["project: Keep verifier outcomes stable across reruns."]
           }
         ],
         "pass_to_pass": [

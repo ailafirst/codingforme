@@ -339,6 +339,32 @@ BUILTIN_HARNESS_SPECS = {
             description="关闭会话摘要：最早的历史条目按预算逐条丢弃，不换成概述（阶段二之前的行为）",
             feature_flags={"session_summary": False},
         ),
+        # ---- 记忆层改造的三个消融 + 两个反向开关 ----
+        HarnessSpec(
+            name="no_cjk_recall",
+            description="关闭中文召回：检索分词退回纯 [A-Za-z0-9_]+，中文笔记结构上召不回来",
+            feature_flags={"cjk_recall": False},
+        ),
+        HarnessSpec(
+            name="no_durable_index_cap",
+            description="关闭描述层与索引：召回按正文全文打分、不做长度归一化，索引也不进上下文",
+            feature_flags={"durable_index_cap": False},
+        ),
+        HarnessSpec(
+            name="no_memory_types",
+            description="关闭类型系统：4 个封闭主题、提升要两个条件同时成立、写入拦截只有安全那半边",
+            feature_flags={"memory_types": False},
+        ),
+        HarnessSpec(
+            name="memory_extractor",
+            description="打开写入器：会话结束后另起一次模型调用，把对话蒸馏成长期记忆（默认关）",
+            feature_flags={"memory_extractor": True},
+        ),
+        HarnessSpec(
+            name="memory_consolidator",
+            description="打开整理器：确定性的去重、过期标记与索引重建（默认关）",
+            feature_flags={"memory_consolidator": True},
+        ),
         HarnessSpec(
             name="window_32k",
             description="上下文窗口降到 32k 档（预算 27,287 / 单条工具结果上限 3,410）",

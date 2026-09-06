@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import textwrap
+import threading
 import uuid
 import hashlib
 import time
@@ -77,6 +78,23 @@ DEFAULT_FEATURE_FLAGS = {
     # 丢弃。关掉 → 直接丢弃，只在 `Omitted context:` 那一行里留个数。两者的区别是
     # 「模型知不知道这一轮发生过」，而在这个开关出现之前它们在工件上分不出来。
     "reversible_squeeze": True,
+    # ------- 记忆层改造（见 docs/architecture/memory-implementation-spec.md）-------
+    # 中文召回：检索分词追加中日韩二元切分。关掉 → 退回纯 `[A-Za-z0-9_]+`，也就是
+    # 中文笔记结构上召不回来的那个状态。
+    "cjk_recall": True,
+    # 描述层与索引：召回只对「名字 + 描述 + 标签」打分（不看正文），并把带描述的
+    # 索引按预算派生的上限注入上下文。关掉 → 退回按正文全文打分、不注入索引。
+    # **一个开关管两件事**是刻意的：拆成两个的话，消融测的是半个机制。
+    "durable_index_cap": True,
+    # 类型系统 + 提升条件解耦 + 价值过滤。三件事同一个开关，理由是它们互为前提：
+    # 解耦（入库变多）离开价值过滤（挡低价值）会让库迅速变脏，单独开任一个测出来
+    # 的都不是这套设计的效果。关掉 → 4 个封闭主题 + 两个条件同时成立 + 只有安全过滤。
+    "memory_types": True,
+    # 写入器：会话结束后另起一次模型调用，把对话蒸馏成记忆。**默认关**——它会改变
+    # 记忆库内容，开着跑出来的数据和关着的不可比；而且它多花一次约 17 秒的调用。
+    "memory_extractor": False,
+    # 整理器：确定性的去重、过期标记、索引重建。**默认关**，同上。
+    "memory_consolidator": False,
 }
 # 稳定前缀的模板。`__TOOL_TEXT__` / `__WORKSPACE_TEXT__` 由 `build_prefix()` 在
 # dedent **之后**替换。
@@ -173,6 +191,52 @@ DURABLE_MEMORY_LINE_PATTERNS = (
     ("user-preferences", re.compile(r"^偏好：\s*(.+)$")),
 )
 SECRET_SHAPED_TEXT_PATTERN = re.compile(r"(?i)(\b(api[_ -]?key|token|secret|password)\b|sk-[A-Za-z0-9_-]{6,})")
+# 价值过滤第三条规则的阈值：一条候选记忆的词有多大比例被 CLAUDE.md / AGENTS.md
+# 的**某一行**覆盖，就判定它「已经写在约定文档里了」。0.6 是拍的，方向上偏松——
+# 挡错的代价是一条记忆没存下来，比存满噪声便宜。收紧到 0.45 是方案里给「入库
+# 噪声爆炸」留的处置口。
+LOW_VALUE_OVERLAP_RATIO = 0.6
+
+# ---- 阶段四：写入器与整理器的常量 ----
+# 喂给写入器的对话条数与单条上限。给「最近若干条」而不是整段会话，是照抄
+# Claude Code 那条硬性规定：只准用最后这几条消息，不许再去调查或验证。
+MEMORY_EXTRACTOR_HISTORY_ENTRIES = 12
+MEMORY_EXTRACTOR_ENTRY_TOKENS = 220
+# 行协议：一行一条。不用 JSON 是因为这个后端在结构化输出上不稳，而解析失败的
+# 代价是整次抽取白跑一个约 17 秒的往返。
+MEMORY_EXTRACTOR_LINE_PATTERN = re.compile(r"(?i)^MEMORY:\s*([a-z]+)\s*\|([^|]*)\|(.+)$")
+MEMORY_EXTRACTOR_PROMPT = textwrap.dedent(
+    """\
+    You distil a coding session into durable memories for a local coding agent.
+
+    Emit one line per memory, in exactly this shape:
+    MEMORY: <type> | <one-line description> | <the fact itself>
+
+    - <type> is one of: user, feedback, project, reference.
+    - The description is what a retriever sees instead of the body: make it specific.
+    - Write at most 3 memories. If nothing is worth keeping, reply exactly: Nothing to save.
+    - Use only what the transcript below states. Do not investigate, do not guess.
+
+    Do NOT save: code structure, file paths, architecture, git history, debugging
+    recipes, or anything already obvious from reading the current repository. Those
+    are recoverable from the code itself. Save what is surprising or not derivable:
+    user preferences, corrections, project goals and constraints, external pointers.
+    """
+).strip()
+
+# 整理器的闸门。Claude Code 是 24 小时 / 5 个会话——那服务的是长期高频使用；
+# 照抄到一个总共可能只跑几十次会话的项目上，这个机制一次都跑不起来，也就无从验收。
+CONSOLIDATE_MIN_HOURS = 0.0
+CONSOLIDATE_MIN_SESSIONS = 3
+
+
+def _parse_iso_timestamp(value):
+    if not value:
+        return 0.0
+    try:
+        return datetime.fromisoformat(str(value)).timestamp()
+    except Exception:
+        return 0.0
 
 # retry 的机器可读原因码。写进 trace 的 `model_parsed` 事件，因为「这一轮为什么
 # 作废」在工件上此前只体现为 kind == "retry"，而三类 retry 的应对完全相反：
@@ -296,6 +360,9 @@ class CodingForMe:
         self.memory = memorylib.LayeredMemory(
             self.session.setdefault("memory", memorylib.default_memory_state()),
             workspace_root=self.root,
+            cjk_recall=self.feature_enabled("cjk_recall"),
+            description_index=self.feature_enabled("durable_index_cap"),
+            memory_types=self.feature_enabled("memory_types"),
         )
         self.session["memory"] = self.memory.to_dict()
         self.tools = self.build_tools()
@@ -335,6 +402,15 @@ class CodingForMe:
         self.last_durable_promotions = []
         self.last_durable_rejections = []
         self.last_durable_superseded = []
+        # 长期记忆索引这一轮的验收字段（条数 / token / 截了几条）。零值也要留着，
+        # 「索引是空的」和「这次没量」在工件上必须分得出来。
+        self.last_durable_index = {"text": "", "entries": 0, "total_entries": 0, "truncated_entries": 0, "incomplete_entries": 0, "tokens": 0}
+        # 价值过滤第三条规则的缓存：工作区里 CLAUDE.md / AGENTS.md **逐行**的词集合。
+        # 逐行而不是整篇，是因为整篇的词集合几乎覆盖任何一条中文笔记（二元切分之后
+        # 更是如此），拿它判重叠会把所有中文记忆全拒掉——方向正好反了。
+        self._doc_line_tokens = None
+        self._memory_extraction_thread = None
+        self.last_memory_extraction = {"status": "not_run", "promoted": [], "rejections": [], "skipped_reason": ""}
         self._last_tool_result_metadata = {}
         self._last_delegate_stats = {}   # delegate 的上下文记账，由 tools.tool_delegate() 填
         # 落盘过的超长工具结果的序号，只保证一次运行内单调递增。
@@ -722,8 +798,23 @@ class CodingForMe:
         }
         return dict(self._last_prefix_refresh)
 
-    def memory_text(self):
-        return self.memory.render_memory_text()
+    def memory_text(self, index_limit=None):
+        """working memory 的仪表盘，`index_limit` 非空时还带上长期记忆索引。
+
+        索引每轮都要重发，所以它的上限由调用方（`ContextManager`）从预算派生后
+        传进来——记忆层不知道预算有多少，也不该知道。截断的条数留在
+        `self.last_durable_index` 里给工件用：零值也写，省略会被读成「没截断」。
+        """
+        index = {"text": "", "entries": 0, "total_entries": 0, "truncated_entries": 0, "incomplete_entries": 0, "tokens": 0}
+        if index_limit and self.feature_enabled("memory") and self.feature_enabled("durable_index_cap"):
+            index = self.memory.durable_index(index_limit, model=getattr(self.model_client, "model", None))
+        self.last_durable_index = index
+        try:
+            return self.memory.render_memory_text(index_text=index.get("text", ""))
+        except TypeError:
+            # 测试里会把 render_memory_text 换成一个无参 lambda；索引是附加信息，
+            # 拿不到就退回没有索引的仪表盘，不该让整轮组装失败。
+            return self.memory.render_memory_text()
 
     def compact_context(self):
         """手动压缩当前会话的上下文(`/compact` 走这里)。
@@ -1341,11 +1432,78 @@ class CodingForMe:
             return "transient_task_state"
         if re.search(r"(?i)\b(stdout|stderr|traceback|exit_code)\b", text) or len(text) > 220:
             return "noisy_output"
+        if self.feature_enabled("memory_types") and self._is_low_value_note(text):
+            return "low_value"
         return ""
 
+    def _document_line_tokens(self):
+        """工作区里那两份约定文档的**逐行**词集合，用于价值过滤第三条规则。"""
+        if self._doc_line_tokens is not None:
+            return self._doc_line_tokens
+        lines = []
+        for name in ("CLAUDE.md", "AGENTS.md"):
+            path = self.root / name
+            try:
+                if not path.is_file():
+                    continue
+                for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+                    tokens = memorylib._tokenize(raw, self.feature_enabled("cjk_recall"))
+                    if len(tokens) >= 4:
+                        lines.append(tokens)
+            except Exception:
+                continue
+        self._doc_line_tokens = lines
+        return lines
+
+    def _is_low_value_note(self, text):
+        """「读一遍代码就知道」的东西不该进长期记忆。
+
+        Claude Code 那份「不要存进记忆」清单里，可确定性判定的就这三条形状；
+        剩下的（架构、调试配方）要理解语义，留给写入器去判。三条都只挡形状，
+        不挡内容——挡错了代价是一条记忆没存下来，比存满噪声便宜。
+        """
+        stripped = text.strip().strip("`'\"")
+        if re.fullmatch(r"[\w./\\-]+\.(?:py|md|json|toml|txt|ya?ml|cfg|ini)[\s.,;:]*", stripped):
+            return True
+        if re.match(r"(?i)^(fixed|fix|修复|修好)\b", stripped) and re.search(
+            r"[\w./\\-]+\.(?:py|md|json|toml|txt|ya?ml|cfg|ini)\b", stripped
+        ):
+            return True
+        note_tokens = memorylib._tokenize(text, self.feature_enabled("cjk_recall"))
+        if len(note_tokens) < 4:
+            return False
+        for line_tokens in self._document_line_tokens():
+            if len(note_tokens & line_tokens) / len(note_tokens) >= LOW_VALUE_OVERLAP_RATIO:
+                return True
+        return False
+
+    def _promotion_label(self, topic):
+        """入库/拒绝归因里那个前缀。类型系统开着时是类型名，关掉时是旧的主题 slug。"""
+        if not self.feature_enabled("memory_types"):
+            return str(topic)
+        return memorylib.DurableMemoryStore.resolve_type(topic)
+
     def extract_durable_promotions(self, user_message, final_answer):
+        """把「这次回答里哪些话该长期记住」抽出来。
+
+        改造前要求两个条件**同时**成立：用户话里有「记住」的意思，**而且**模型答案
+        里有 `Project convention:` 这类前缀行。任一侧不匹配就静默丢弃——v0.3.0 修的
+        那个「记住这件事从不生效」正出在这里。
+
+        现在两个条件**任一成立即可**：
+        - 有前缀行 → 按前缀给的类型入库（用户没说「记住」也算，模型给出结构化结论
+          本身就是一个信号）。
+        - 只有意图、没有前缀行 → 取答案首句当事实，类型落到默认的 project。
+
+        解耦会让入库量上升，挡住噪声的是 `reject_durable_reason()` 里新增的价值
+        过滤——两者必须同时存在，只做前者会让库迅速变脏。
+        """
         user_text = str(user_message or "")
-        if not (DURABLE_MEMORY_INTENT_PATTERN.search(user_text) or DURABLE_MEMORY_INTENT_ZH_PATTERN.search(user_text)):
+        has_intent = bool(
+            DURABLE_MEMORY_INTENT_PATTERN.search(user_text) or DURABLE_MEMORY_INTENT_ZH_PATTERN.search(user_text)
+        )
+        decoupled = self.feature_enabled("memory_types")
+        if not has_intent and not decoupled:
             return [], []
         promotions = []
         rejections = []
@@ -1361,20 +1519,228 @@ class CodingForMe:
                 if note_text:
                     reason = self.reject_durable_reason(note_text)
                     if reason:
-                        rejections.append(f"{topic}:{reason}")
+                        # 拒绝归因里的标签必须和入库时用的是同一套名字，否则同一
+                        # 条记忆「进了」和「被拒了」在工件上会写成两种命名体系。
+                        rejections.append(f"{self._promotion_label(topic)}:{reason}")
                         break
                     promotions.append((topic, note_text))
                 break
+        if promotions or not (decoupled and has_intent):
+            return promotions, rejections
+        # 只有意图、没有任何前缀行：取答案第一句非空的话。这一支才是把「用户说了
+        # 记住、模型用自己的话答了」从静默丢弃里救回来的那条路径。
+        for line in str(final_answer or "").splitlines():
+            text = line.strip()
+            if not text or REDACTED_VALUE in text:
+                continue
+            fact = memorylib.derive_description(text, limit=memorylib.NOTE_TOKENS)
+            reason = self.reject_durable_reason(fact)
+            if reason:
+                rejections.append(f"{memorylib.DEFAULT_MEMORY_TYPE}:{reason}")
+                break
+            if not fact:
+                break
+            promotions.append((memorylib.DEFAULT_MEMORY_TYPE, fact))
+            break
         return promotions, rejections
 
     def promote_durable_memory(self, user_message, final_answer):
         promotions, rejections = self.extract_durable_promotions(user_message, final_answer)
-        promoted, superseded = self.memory.promote_durable(promotions)
+        origin = {"session_id": str(self.session.get("id", "")), "run_seq": self.current_run_seq}
+        promoted, superseded = self.memory.promote_durable(promotions, origin=origin)
         self.session["memory"] = self.memory.to_dict()
         self.last_durable_promotions = promoted
         self.last_durable_rejections = rejections
         self.last_durable_superseded = superseded
         return promoted, rejections, superseded
+
+    # ------------------------------------------------------------------
+    # 阶段四：写入器与整理器。两者默认关闭（`memory_extractor` /
+    # `memory_consolidator`），理由是它们都会改变记忆库内容，开着跑出来的数据和
+    # 关着的不可比；写入器还要多花一次约 17 秒的模型调用。
+    # ------------------------------------------------------------------
+
+    def _extraction_skip_reason(self):
+        """照抄 Claude Code 的两个跳过条件。
+
+        ①这次会话里已经自己写过记忆了（提升路径已经生效，别重复劳动）；
+        ②自上次抽取以来用户没说过一句 ≥3 个词的话（纯工具循环没有可抽取的信号）。
+        """
+        if self.last_durable_promotions:
+            return "already_promoted_this_session"
+        cursor = int(self.session.get("memory_extraction_cursor", 0) or 0)
+        entries = list(self.session.get("history", []))[cursor:]
+        for entry in entries:
+            if str(entry.get("role", "")) != "user":
+                continue
+            text = str(entry.get("text", "") or entry.get("content", ""))
+            if len(memorylib._tokenize(text, cjk=True)) >= 3:
+                return ""
+        return "no_new_user_signal"
+
+    def extract_memories(self, force=False):
+        """写入器：另起一次模型调用，把刚发生的对话蒸馏成 0..k 条长期记忆。
+
+        和 Claude Code 的差别是刻意的：**不给它任何工具**，让它只输出文本，由这里
+        解析后自己落盘。它那套给受限 Write 工具、跑 5 轮，在本项目的后端上等于多烧
+        4 个约 17 秒的往返，而我们要它做的事一轮就能说完。
+
+        返回 `{"status", "promoted", "rejections", "skipped_reason"}`；任何失败都
+        返回结构而不是抛异常——它跑在一次已经答完的运行之后，不该把结果带崩。
+        """
+        if not force and not self.feature_enabled("memory_extractor"):
+            return {"status": "disabled", "promoted": [], "rejections": [], "skipped_reason": "disabled"}
+        skip = self._extraction_skip_reason()
+        if skip and not force:
+            return {"status": "skipped", "promoted": [], "rejections": [], "skipped_reason": skip}
+        transcript = self._extraction_transcript()
+        if not transcript.strip():
+            return {"status": "skipped", "promoted": [], "rejections": [], "skipped_reason": "empty_transcript"}
+        try:
+            response = self.model_client.complete(
+                [
+                    {"role": "system", "content": MEMORY_EXTRACTOR_PROMPT},
+                    {"role": "user", "content": transcript},
+                ],
+                max_new_tokens=self.max_new_tokens,
+            )
+        except Exception as error:  # 模型或网络故障不该影响已经答完的那次运行
+            return {"status": "error", "promoted": [], "rejections": [], "skipped_reason": str(error)[:200]}
+        promotions, rejections = self._parse_extracted_memories(str(response.get("text", "") or ""))
+        origin = {"session_id": str(self.session.get("id", "")), "run_seq": self.current_run_seq}
+        promoted, superseded = self.memory.promote_durable(promotions, origin=origin)
+        self.session["memory"] = self.memory.to_dict()
+        self.session["memory_extraction_cursor"] = len(self.session.get("history", []))
+        self.session_store.save(self.session)
+        return {
+            "status": "ok",
+            "promoted": promoted,
+            "superseded": superseded,
+            "rejections": rejections,
+            "skipped_reason": "",
+        }
+
+    def _extraction_transcript(self):
+        """喂给写入器的那段对话。只给最近若干条，且只给文本。"""
+        entries = list(self.session.get("history", []))[-MEMORY_EXTRACTOR_HISTORY_ENTRIES:]
+        lines = []
+        for entry in entries:
+            role = str(entry.get("role", "")).strip() or "assistant"
+            text = str(entry.get("text", "") or entry.get("content", "")).strip()
+            if not text:
+                continue
+            lines.append(f"{role}: {memorylib.clip(text, MEMORY_EXTRACTOR_ENTRY_TOKENS)}")
+        return "\n".join(lines)
+
+    def _parse_extracted_memories(self, text):
+        """解析写入器的输出。
+
+        协议是一行一条 `MEMORY: <type> | <description> | <body>`，没有可存的就只输出
+        `Nothing to save.`。刻意选行协议而不是 JSON：这个后端在结构化输出上不稳，
+        而这里解析失败的代价是整次抽取白跑。每条照样过 `reject_durable_reason()`
+        ——写入器不是绕过写入拦截的旁路。
+        """
+        promotions = []
+        rejections = []
+        for line in str(text or "").splitlines():
+            match = MEMORY_EXTRACTOR_LINE_PATTERN.match(line.strip())
+            if not match:
+                continue
+            mtype = memorylib.DurableMemoryStore.resolve_type(match.group(1))
+            body = match.group(3).strip()
+            if not body:
+                continue
+            reason = self.reject_durable_reason(body)
+            if reason:
+                rejections.append(f"{mtype}:{reason}")
+                continue
+            promotions.append((mtype, body))
+        return promotions, rejections
+
+    def schedule_memory_extraction(self):
+        """抽取跑在答案返回**之后**的后台线程里。
+
+        不能放在用户等待路径上：这个后端每次调用有约 17 秒固定延迟，同步跑等于
+        让每次问答凭空多等一次往返。线程只写记忆目录和 session 的抽取游标，
+        不碰 history——那条边界是硬的。
+        """
+        if not self.feature_enabled("memory_extractor"):
+            return None
+        thread = threading.Thread(target=self._run_extraction_quietly, name="memory-extractor", daemon=True)
+        self._memory_extraction_thread = thread
+        thread.start()
+        return thread
+
+    def _run_extraction_quietly(self):
+        try:
+            self.last_memory_extraction = self.extract_memories()
+        except Exception as error:
+            self.last_memory_extraction = {"status": "error", "skipped_reason": str(error)[:200]}
+
+    def consolidate_memory(self, force=False):
+        """整理器：去重、标记过期、重建索引。全部确定性，不调模型。
+
+        闸门比 Claude Code 松得多。它那套是「距上次 ≥24 小时 **且** ≥5 个会话」，
+        服务的是长期高频使用；照抄到一个总共可能只跑几十次会话的项目上，等于这个
+        机制一次都跑不起来——那就无从验收。所以闸门参数化，默认 0 小时 / 3 个会话，
+        另有手动入口。跨进程用一个锁文件防并发。
+        """
+        store = getattr(self.memory, "durable_store", None)
+        if store is None:
+            return {"status": "unavailable", "ran": False}
+        if not force and not self.feature_enabled("memory_consolidator"):
+            return {"status": "disabled", "ran": False}
+        state_path = store.root / ".consolidate-state.json"
+        lock_path = store.root / ".consolidate-lock"
+        state = {}
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+        except Exception:
+            state = {}
+        sessions = set(str(item) for item in state.get("sessions_since", []) or [])
+        sessions.add(str(self.session.get("id", "")))
+        last_run = _parse_iso_timestamp(state.get("last_run_at", ""))
+        hours = (time.time() - last_run) / 3600.0 if last_run else float("inf")
+        gate_ok = force or (
+            hours >= CONSOLIDATE_MIN_HOURS and len(sessions) >= CONSOLIDATE_MIN_SESSIONS
+        )
+        if not gate_ok:
+            self._write_consolidate_state(state_path, state.get("last_run_at", ""), sessions)
+            return {
+                "status": "gated",
+                "ran": False,
+                "hours_since": None if hours == float("inf") else round(hours, 3),
+                "sessions_since": len(sessions),
+            }
+        try:
+            store.root.mkdir(parents=True, exist_ok=True)
+            # O_EXCL 就是这里的跨进程锁：两个进程同时过闸门时只有一个建得成。
+            handle = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            return {"status": "locked", "ran": False}
+        try:
+            os.close(handle)
+            result = self.memory.consolidate_durable()
+            self.session["memory"] = self.memory.to_dict()
+            self._write_consolidate_state(state_path, now(), set())
+            result["status"] = "ok"
+            return result
+        finally:
+            try:
+                lock_path.unlink()
+            except OSError:
+                pass
+
+    @staticmethod
+    def _write_consolidate_state(path, last_run_at, sessions):
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps({"last_run_at": last_run_at, "sessions_since": sorted(sessions)}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
 
     def ask(self, user_message):
         """执行一次完整的 agent 回合，直到产出最终答案或命中停止条件。
@@ -1738,6 +2104,9 @@ class CodingForMe:
                 },
             )
             self.run_store.write_report(task_state, self.redact_artifact(self.build_report(task_state)))
+            # 写入器跑在答案返回之后的后台线程里（默认关）。放在 write_report 之后
+            # 是刻意的：报告已经落盘，抽取无论成败都不会改变这次运行的工件。
+            self.schedule_memory_extraction()
             return final
 
         if attempts >= max_attempts and tool_steps < self.max_steps:
@@ -1769,6 +2138,7 @@ class CodingForMe:
             },
         )
         self.run_store.write_report(task_state, self.redact_artifact(self.build_report(task_state)))
+        self.schedule_memory_extraction()
         return final
 
     def execute_plan(self, source):
@@ -2171,6 +2541,11 @@ class CodingForMe:
             "durable_promotions": list(self.last_durable_promotions),
             "durable_rejections": list(self.last_durable_rejections),
             "durable_superseded": list(self.last_durable_superseded),
+            # 记忆索引这一轮的规模与截断。零值也写——「索引是空的」和「这次没量」
+            # 在一个 0 上分不出来，而两者的应对相反。
+            "durable_index": {
+                key: value for key, value in dict(self.last_durable_index).items() if key != "text"
+            },
             "redacted_env": self.detected_secret_env_summary(),
         }
 
@@ -2423,7 +2798,13 @@ class CodingForMe:
         self.session["context_summary"] = {}
         self.session["memory"].clear()
         self.session["memory"].update(memorylib.default_memory_state())
-        self.memory = memorylib.LayeredMemory(self.session["memory"], workspace_root=self.root)
+        self.memory = memorylib.LayeredMemory(
+            self.session["memory"],
+            workspace_root=self.root,
+            cjk_recall=self.feature_enabled("cjk_recall"),
+            description_index=self.feature_enabled("durable_index_cap"),
+            memory_types=self.feature_enabled("memory_types"),
+        )
         self.session_store.save(self.session)
 
     def path(self, raw_path):

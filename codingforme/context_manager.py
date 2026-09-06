@@ -92,6 +92,21 @@ PROTECTED_SECTIONS = ("prefix",)
 SECTION_ORDER = ("prefix", "memory", "relevant_memory", "history", "current_request")
 CURRENT_REQUEST_SECTION = "current_request"
 RELEVANT_MEMORY_LIMIT = 3
+# 长期记忆索引的上限，单位 token。它**每轮重发**（和工具 schema 同一个性质），
+# 所以不能写死成绝对常量——那正是阶段二从各段配额里删掉的那个病。
+#
+# 除数 16 的含义：索引最多占预算的 1/16。8k 兜底档算出 270，取下限 400（低于这个
+# 数索引连三五条都放不下，等于没有）；1M 档算出 7,396，取上限 3,000（约占预算
+# 2.5%，与 Claude Code 给索引的 25 KB 对 200k 窗口是同一个量级）。
+DURABLE_INDEX_BUDGET_DIVISOR = 16
+DURABLE_INDEX_MIN_TOKENS = 400
+DURABLE_INDEX_MAX_TOKENS = 3000
+
+
+def durable_index_limit(total_budget):
+    """长期记忆索引这一轮能占多少 token。"""
+    derived = int(total_budget or 0) // DURABLE_INDEX_BUDGET_DIVISOR
+    return max(DURABLE_INDEX_MIN_TOKENS, min(DURABLE_INDEX_MAX_TOKENS, derived))
 # prefix 段内部的分界线：它之前是规则和工具清单（跨任务恒定），从这一行起是仓库
 # 快照和 resume checkpoint（每个任务都不同）。`_assemble_messages()` 按它切开，
 # 把恒定的那半留在 system 里，好让前缀缓存吃得到工具 schema 那一大块。
@@ -1075,7 +1090,7 @@ class ContextManager:
             context_reduction_enabled = self.agent.feature_enabled("context_reduction")
         section_texts = {
             "prefix": str(getattr(self.agent, "prefix", "")),
-            "memory": "Memory:\n- disabled" if not memory_enabled else str(self.agent.memory_text()),
+            "memory": "Memory:\n- disabled" if not memory_enabled else str(self._memory_text()),
             "history": "",
             CURRENT_REQUEST_SECTION: f"Current user request:\n{user_message}",
         }
@@ -1426,6 +1441,24 @@ class ContextManager:
                 rendered_text = _tail_clip(raw, int(budget), self._model_name()) if budget is not None else raw
                 rendered[section] = SectionRender(raw=raw, budget=int(budget) if budget is not None else 0, rendered=rendered_text, details={})
         return rendered
+
+    def _memory_text(self):
+        """working memory + 长期记忆索引。
+
+        索引上限从 `total_budget` 派生后传下去——记忆层不知道预算，也不该知道。
+        老的 `memory_text()`（不带参数）仍然可用，索引就是空的。
+        """
+        try:
+            return self.agent.memory_text(index_limit=durable_index_limit(self.total_budget))
+        except TypeError:
+            # 调用方可能塞进来一个只认无参签名的替身（测试里的假 agent）。
+            return self.agent.memory_text()
+
+    def _durable_index_stats(self):
+        stats = getattr(self.agent, "last_durable_index", None)
+        if not isinstance(stats, dict):
+            return {"entries": 0, "total_entries": 0, "truncated_entries": 0, "tokens": 0}
+        return stats
 
     def _render_relevant_memory(self, selected_notes, budget):
         model = self._model_name()
@@ -2276,6 +2309,13 @@ class ContextManager:
                 "rendered_tokens": rendered["relevant_memory"].rendered_tokens,
                 "rendered_notes": list(rendered["relevant_memory"].details.get("rendered_notes", [])),
                 "rendered_count": int(rendered["relevant_memory"].details.get("rendered_count", 0)),
+                # 长期记忆索引这一轮的验收字段。**零值也写**：索引空着和这次没量
+                # 在一个 0 上分不出来，而两者的应对相反。
+                "index_limit": durable_index_limit(self.total_budget),
+                "index_entries": int(self._durable_index_stats().get("entries", 0)),
+                "index_total_entries": int(self._durable_index_stats().get("total_entries", 0)),
+                "index_truncated_entries": int(self._durable_index_stats().get("truncated_entries", 0)),
+                "index_tokens": int(self._durable_index_stats().get("tokens", 0)),
             },
             "history": {
                 "raw_tokens": rendered["history"].raw_tokens,

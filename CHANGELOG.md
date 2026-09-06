@@ -2,6 +2,31 @@
 
 本项目的版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。0.x 阶段,次版本号的变化即可能包含破坏性改动。
 
+## [未发布]
+
+这一版改的是**记忆层**。参照系是从 Claude Code 可执行文件里提取出来的那套机制(调研见 `docs/architecture/claude-code-memory-research.md`,施工图见 `docs/architecture/memory-implementation-spec.md`),但有三处刻意不抄,理由都写在下面。
+
+### 新增
+
+- **检索分词认中文了(阶段一,`cjk_recall`,默认开)**。`memory._tokenize()` 在 `[A-Za-z0-9_]+` 之外追加中日韩**相邻两字的组合**(「构建命令」→ 构建/建命/命令)。在这之前,中文笔记**结构上**召不回来——`benchmarks/session_tasks.json` 里那句「关键词一律用英文」就是在为这个洞让路。不引分词库是因为运行时依赖只有 litellm 那条硬约束(词表同样是数据文件);不用单字是因为「的」「是」会命中一切。数据集新增三条中文会话(`recall_build_command_zh` / `aggregate_lint_and_dependency_zh` / `update_indentation_convention_zh`),跨会话套件从 5 条会话 14 条断言变成 8 条会话 23 条断言。**证伪证据**:`no_cjk_recall` 变体下 `session_evidence_surfaced` 从 7/7 掉到 4/7、`supersede_recorded` 从 2/2 掉到 1/2,挂的恰好是中文那三条,英文四条一条不动。
+- **副作用一并修好:中文事实现在会互相覆盖了**。主语键 `_subject_key()` 和召回共用同一个分词,所以中文一开,「缩进是 4 个空格」→「缩进是 2 个空格」的覆盖语义从**永不生效**变成生效。英文侧的键必须逐字节不变,由测试锁住。
+- **召回只读描述那一行,不读正文(阶段二,`durable_index_cap`,默认开)**。每条长期记忆多一个 `description` 字段(上限 `DESCRIPTION_TOKENS = 80`),`scoring_tokens()` 只对「名字 + 描述 + 标签」打分,并按候选词数的平方根做长度归一化(不做的话中文条目会系统性压过英文——同一句话中文切出的词多 4 倍以上)。**名字从描述切,不从正文切**:从正文切前 48 个字符会把「顺带提到的东西」也带进名字,而名字参与打分,等于从后门把正文关键词放回了打分对象。描述由 `derive_description()` 确定性生成(取第一句、保留句末标点),**阶段二不引入任何模型调用**。
+- **长期记忆索引每轮进上下文,上限从预算派生**。`context_manager.durable_index_limit(total_budget)` = `clamp(total_budget // 16, 400, 3000)` token(8k 兜底档打下限 400,1M 档打上限 3000,约占预算 2.5%)。这是 Claude Code 遥测里 `listed` 那一层的等价物。**截断刻意不静默**(它那边是 200 行硬截断、不吭声):`prompt_metadata["relevant_memory"]` 新增 `index_limit` / `index_entries` / `index_total_entries` / `index_truncated_entries` / `index_tokens`,report 新增 `durable_index`,零值也写——静默截断在工件上和「库里就这么多」长得一模一样,而两者的应对相反。
+- **一事一文件的记忆格式与四种类型(阶段三,`memory_types`,默认开)**。`MEMORY_TYPES = user / feedback / project / reference` 取代原来 4 个封闭主题;每条记忆一个 `topics/<name>.md`,开头三行元信息(`name` / `description` / `metadata`),元数据里带 `type`、创建时间和**溯源**(`origin_session_id` / `origin_run_seq`)。`migrate_legacy()` 首次写入时把旧库整体迁移一次:**先整目录备份到 `memory.bak-<时间戳>/` 再改写**,失败整目录还原;旧格式此后只读不写(两种格式长期并存会让索引上限的计算分叉)。`[[name]]` 互链只做存储,链到一个不存在的名字不算错误。
+- **提升条件解耦(阶段三)**。`extract_durable_promotions()` 的两个条件从「而且」改成「或者」:有 `Project convention:` 这类前缀行就入库(用户没说「记住」也算),只有「记住」的意图而模型用自己的话答的,就取答案首句、类型落 `project`。改造前任一侧不匹配即**静默丢弃**——0.3.0 修的那个「记住这件事从不生效」正出在这里,这次是把剩下那一半补上。
+- **写入拦截新增价值维度(阶段三)**。`reject_durable_reason()` 多一类 `low_value`,三条确定性规则:整句只由路径与标点构成、以 fix|修复 开头且句中含文件路径、与工作区里 `CLAUDE.md`/`AGENTS.md` 的**某一行**词重叠 ≥ 0.6。**逐行比而不是整篇比**是踩过的坑:整篇的词集合几乎覆盖任何一条中文笔记,拿它判重叠会把所有中文记忆全拒掉,方向正好反了。解耦(入库变多)和价值过滤(挡低价值)必须同阶段做,只做前者会让库迅速变脏。
+- **写入器与整理器(阶段四,`memory_extractor` / `memory_consolidator`,两者默认关)**。写入器是一次模型调用,输入最近 12 条消息,输出行协议 `MEMORY: <type> | <描述> | <正文>`;**不给它任何工具**,由控制程序解析后落盘——Claude Code 那套给受限写工具、跑 5 轮,在这个后端上等于多烧 4 个约 17 秒的往返。它跑在 `ask()` 返回**之后**的后台线程里,只写记忆目录、不碰会话状态,产出照样过写入拦截。整理器全部确定性:同类型同主语去重、**点名的文件不见了是标记 `stale` 不是删除**、重建索引;闸门加 `.consolidate-lock` 防跨进程并发。**闸门刻意不抄 24 小时 / 5 个会话**(默认降到 0 小时 / 3 个会话):在一个总共可能只跑几十次会话的项目上照抄等于这个机制一次都跑不起来,那就无从验收。
+- **`/memory` 现在显示长期记忆索引,并新增两个手动入口** `/memory extract`(蒸馏本次会话)与 `/memory compact`(去重、标记过期、重建索引)。索引按当前预算派生的上限渲染,和真正发给模型的那份走同一个函数。
+- **五个新变体**:`no_cjk_recall`、`no_durable_index_cap`、`no_memory_types`(关掉上面三个机制)、`memory_extractor`、`memory_consolidator`(打开默认关闭的那两个)。`BUILTIN_HARNESS_SPECS` 从 17 个变成 22 个。
+- **`tests/test_memory_phases.py`(27 条)**:每个阶段一组「机制生效」加一组「关掉开关必须恰好挂」的证伪断言。
+
+### 破坏性改动
+
+- **长期记忆的磁盘格式从 v1 换成 v2**,旧库在第一次写入时自动迁移(带整目录备份)。旧的 `topics/project-conventions.md` 这类文件不再存在,内容拆成了一条一个文件。
+- **`durable_promotions` / `durable_rejections` / `durable_superseded` 里的前缀从主题 slug 换成类型名**(`project-conventions:` → `project:`,`dependency-facts:` → `reference:`)。两个固定基准任务(`durable_promotion_accept` / `durable_promotion_reject`)的判定跟着改了;`durable_promotion_accept` 现在查索引文件而不是某个主题文件——文件名由内容 slug 出来,把它写进判定等于把命名也变成契约。
+- **`memory_text()` 多了一个可选参数 `index_limit`**;`LayeredMemory` 与 `DurableMemoryStore` 的构造函数多了三个开关参数。默认值保持原行为的调用方不受影响。
+- **改了 `memory.py` / `runtime.py` / `context_manager.py`,跑批指纹 `code_signature` 因此变化**,这一版的评测数据和 0.3.0 的**不可直接比较**。
+
 ## [0.3.0] - 2026-09-05
 
 这一版把上下文治理从"一根裁剪线"做成分级流水线(阶段三~十二):`history` 变成只追加的事实记录、发给模型的是它按预算与新鲜度算出的一次投影;超限工具结果落盘可取回、过期读会被标记、最近窗口按块推进以保住前缀缓存;预算改由上下文窗口派生而不是写死常量。另修复了一个生产级缺口——系统提示词此前从未教模型长期记忆的写法,导致"记住这件事"类请求静默不生效。

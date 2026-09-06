@@ -5,7 +5,7 @@
   "evaluated_object": "harness",
   "notes": [
     "评的是「控制循环有没有把证据带回上下文」，不是「模型有没有答对」——脚本化模型不真的读 prompt，问后者没有意义，而前者恰好是 harness 的职责。",
-    "召回靠 memory.py 的 _tokenize（正则 [A-Za-z0-9_]+），中文不产生 token，所以事实与提问的关键词一律用英文；中文只出现在描述里。",
+    "英文任务和中文任务分开列，是因为召回对两种文字走的是**同一条**排序、但**不同的**分词：英文按词，中文按相邻两字的组合（`memory._tokenize`）。中文那三条在改造前结构上不可能通过，它们是阶段一的验收对象。",
     "notes_exclude 是必需的：只断言「命中了」而不断言「没多带」，把所有笔记原样倒进 prompt 也能通过。"
   ],
   "tasks": [
@@ -171,6 +171,135 @@
           "expect": {
             "notes_contain": [
               "v0.2.0"
+            ],
+            "min_notes": 1
+          }
+        }
+      ]
+    },
+    {
+      "id": "recall_build_command_zh",
+      "question_type": "single_session_recall",
+      "description": "中文版的单会话召回。第一轮用中文立一条约定，第二轮换个中文问法要回来——改造前中文一个检索词都切不出来，这条结构上必挂。",
+      "turns": [
+        {
+          "request": "请记住：构建命令是 uv run pytest。",
+          "outputs": [
+            {
+              "final": "项目约定：构建命令是 uv run pytest。"
+            }
+          ]
+        },
+        {
+          "request": "这个项目该用什么构建命令跑测试？",
+          "outputs": [
+            {
+              "final": "用 uv run pytest。"
+            }
+          ],
+          "expect": {
+            "notes_contain": [
+              "构建命令"
+            ],
+            "min_notes": 1
+          }
+        }
+      ]
+    },
+    {
+      "id": "aggregate_lint_and_dependency_zh",
+      "question_type": "cross_session_aggregation",
+      "description": "中文版的跨会话聚合。三轮各立一条不同主题的中文事实，第四轮的提问只涉及其中两条：既要带回相关的两条，也不能把无关的第三条一起倒进来。",
+      "turns": [
+        {
+          "request": "请记住：代码检查用 ruff check 跑。",
+          "outputs": [
+            {
+              "final": "项目约定：代码检查用 ruff check 跑。"
+            }
+          ]
+        },
+        {
+          "request": "请记住：运行时只依赖 litellm 这一个包。",
+          "outputs": [
+            {
+              "final": "依赖：运行时只依赖 litellm 这一个包。"
+            }
+          ]
+        },
+        {
+          "request": "请记住：架构报告一律用中文写。",
+          "outputs": [
+            {
+              "final": "偏好：架构报告一律用中文写。"
+            }
+          ]
+        },
+        {
+          "request": "提交前要跑哪个代码检查？运行时允许依赖哪个包？",
+          "outputs": [
+            {
+              "final": "代码检查是 ruff check；运行时只允许 litellm。"
+            }
+          ],
+          "expect": {
+            "notes_contain": [
+              "ruff check",
+              "litellm"
+            ],
+            "notes_exclude": [
+              "架构报告"
+            ],
+            "min_notes": 2
+          }
+        }
+      ]
+    },
+    {
+      "id": "update_indentation_convention_zh",
+      "question_type": "knowledge_update",
+      "description": "中文版的知识更新。同一主题先说 4 个空格、隔一轮改成 2 个空格。它同时验中文的覆盖语义——主语键和召回共用同一个分词，中文一开，覆盖才从「永不生效」变成「生效」。",
+      "turns": [
+        {
+          "request": "请记住：缩进是 4 个空格。",
+          "outputs": [
+            {
+              "final": "项目约定：缩进是 4 个空格。"
+            }
+          ]
+        },
+        {
+          "request": "请记住：变更日志用中文写。",
+          "outputs": [
+            {
+              "final": "偏好：变更日志用中文写。"
+            }
+          ]
+        },
+        {
+          "request": "我们改主意了。请记住：缩进是 2 个空格。",
+          "outputs": [
+            {
+              "final": "项目约定：缩进是 2 个空格。"
+            }
+          ],
+          "expect": {
+            "superseded": true
+          }
+        },
+        {
+          "request": "这个项目的缩进用几个空格？",
+          "outputs": [
+            {
+              "final": "2 个空格。"
+            }
+          ],
+          "expect": {
+            "notes_contain": [
+              "2 个空格"
+            ],
+            "notes_exclude": [
+              "4 个空格"
             ],
             "min_notes": 1
           }

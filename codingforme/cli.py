@@ -54,7 +54,9 @@ HELP_DETAILS = textwrap.dedent(
     /help    Show this help message.
     /context Show the context window tier and budget; /context 128k sets the tier.
     /compact Compact the transcript now instead of waiting for the pressure threshold.
-    /memory  Show the agent's distilled working memory.
+    /memory  Show working memory and the durable memory index.
+             /memory extract distils this session into durable memories (one model call).
+             /memory compact dedupes durable memories, flags stale ones, rebuilds the index.
     /session Show the path to the saved session file.
     /reset   Clear the current session history and memory.
     /exit    Exit the agent.
@@ -104,6 +106,57 @@ def _format_tokens(value):
     if value >= 1_000 and value % 1_000 == 0:
         return f"{value // 1_000}k"
     return f"{value:,}"
+
+
+def _memory_status(agent):
+    """working memory 的仪表盘 + 长期记忆索引。
+
+    索引按当前预算派生的上限渲染，和真正发给模型的那份是同一个函数——两份分开算
+    的话，用户在 REPL 里看到的就不是模型看到的。
+    """
+    from .context_manager import durable_index_limit
+
+    text = agent.memory_text(index_limit=durable_index_limit(agent.context_manager.total_budget))
+    stats = getattr(agent, "last_durable_index", {}) or {}
+    total = int(stats.get("total_entries", 0))
+    truncated = int(stats.get("truncated_entries", 0))
+    lines = [text, ""]
+    if total:
+        lines.append(f"durable memories: {total} total, {stats.get('entries', 0)} in the index ({stats.get('tokens', 0)} tokens)")
+        # 截断要说出来：静默截断和「库里就这么多」在同一份输出上分不出来。
+        if truncated:
+            lines.append(f"{truncated} not shown — the index budget is {durable_index_limit(agent.context_manager.total_budget)} tokens")
+    else:
+        lines.append("durable memories: none yet (say \"remember ...\" or run /memory extract)")
+    return "\n".join(lines)
+
+
+def _extraction_report(result):
+    status = str(result.get("status", ""))
+    if status == "skipped":
+        return f"nothing extracted — {result.get('skipped_reason', '')}"
+    if status == "error":
+        return f"extraction failed — {result.get('skipped_reason', '')}"
+    promoted = result.get("promoted", []) or []
+    rejections = result.get("rejections", []) or []
+    if not promoted and not rejections:
+        return "nothing worth saving from this session"
+    lines = [f"saved {len(promoted)}:"] + [f"- {item}" for item in promoted]
+    if rejections:
+        lines.append(f"rejected {len(rejections)}: " + ", ".join(rejections))
+    return "\n".join(lines)
+
+
+def _consolidation_report(result):
+    if not result.get("ran"):
+        return f"nothing consolidated — {result.get('status', 'unavailable')}"
+    stale = result.get("marked_stale", []) or []
+    lines = [
+        f"{result.get('entries', 0)} memories kept, {result.get('removed_duplicates', 0)} duplicates removed",
+    ]
+    if stale:
+        lines.append("flagged as possibly stale (they name files that are gone): " + ", ".join(stale))
+    return "\n".join(lines)
 
 
 def _compact_report(report):
@@ -694,7 +747,16 @@ def main(argv=None):
             show(_compact_report(agent.compact_context()), title="/compact")
             continue
         if user_input == "/memory":
-            show(agent.memory_text(), title="/memory")
+            show(_memory_status(agent), title="/memory")
+            continue
+        if user_input in {"/memory extract", "/memory compact"}:
+            # 两个手动入口。写入器和整理器默认关，`force=True` 让用户在不开变体的
+            # 情况下也能按需跑一次——把「什么时候该沉淀」这个判断交回给用户，
+            # 正是这两个机制在本项目规模上唯一确定有作用对象的用法。
+            if user_input.endswith("extract"):
+                show(_extraction_report(agent.extract_memories(force=True)), title="/memory extract")
+            else:
+                show(_consolidation_report(agent.consolidate_memory(force=True)), title="/memory compact")
             continue
         if user_input == "/session":
             show(agent.session_path, title="/session")

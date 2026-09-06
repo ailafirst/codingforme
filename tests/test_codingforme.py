@@ -2162,6 +2162,20 @@ def test_partial_success_creates_process_note_for_exploration_history(tmp_path):
     assert "README.md" in process_notes[-1]["tags"]
 
 
+def durable_memory_text(root):
+    """记忆库里所有文件拼起来的文本。
+
+    v2 之后一条记忆一个文件、文件名由内容 slug 出来，所以测试不再断言具体路径——
+    断言路径等于把「文件叫什么」也变成契约，而那不是这几条用例要守的东西。
+    """
+    memory_root = Path(root) / ".codingforme" / "memory"
+    if not memory_root.exists():
+        return ""
+    return "\n".join(
+        path.read_text(encoding="utf-8") for path in sorted(memory_root.rglob("*.md"))
+    )
+
+
 def test_explicit_memory_promotion_persists_durable_memory_topics(tmp_path):
     agent = build_agent(
         tmp_path,
@@ -2182,20 +2196,20 @@ def test_explicit_memory_promotion_persists_durable_memory_topics(tmp_path):
     assert "Project convention:" in answer
 
     index_path = tmp_path / ".codingforme" / "memory" / "MEMORY.md"
-    conventions_path = tmp_path / ".codingforme" / "memory" / "topics" / "project-conventions.md"
-    decisions_path = tmp_path / ".codingforme" / "memory" / "topics" / "key-decisions.md"
     report = json.loads(agent.run_store.report_path(agent.current_task_state).read_text(encoding="utf-8"))
+    index_text = index_path.read_text(encoding="utf-8")
+    stored = durable_memory_text(tmp_path)
 
     assert index_path.exists()
-    assert conventions_path.exists()
-    assert decisions_path.exists()
-    assert "project-conventions" in index_path.read_text(encoding="utf-8")
-    assert "Use constrained tools instead of guessing." in conventions_path.read_text(encoding="utf-8")
-    assert "Keep durable memory topic-based and lightweight." in decisions_path.read_text(encoding="utf-8")
+    # 索引一行一条记忆，那一行就是描述——召回只读它，所以它必须带得动内容。
+    assert "Use constrained tools instead of guessing." in index_text
+    assert "Keep durable memory topic-based and lightweight." in index_text
+    assert "Use constrained tools instead of guessing." in stored
+    assert "Keep durable memory topic-based and lightweight." in stored
     assert report["durable_promotions"] == [
-        "project-conventions: Use constrained tools instead of guessing.",
-        "project-conventions: Preserve local agent state under .codingforme/.",
-        "key-decisions: Keep durable memory topic-based and lightweight.",
+        "project: Use constrained tools instead of guessing.",
+        "project: Preserve local agent state under .codingforme/.",
+        "project: Keep durable memory topic-based and lightweight.",
     ]
 
 
@@ -2214,11 +2228,10 @@ def test_explicit_memory_promotion_supports_chinese_intent_and_labels(tmp_path):
 
     assert "项目约定：" in answer
 
-    conventions_path = tmp_path / ".codingforme" / "memory" / "topics" / "project-conventions.md"
-    decisions_path = tmp_path / ".codingforme" / "memory" / "topics" / "key-decisions.md"
+    stored = durable_memory_text(tmp_path)
 
-    assert "优先使用受约束工具，不要靠猜。" in conventions_path.read_text(encoding="utf-8")
-    assert "持久记忆保持轻量、按 topic 管理。" in decisions_path.read_text(encoding="utf-8")
+    assert "优先使用受约束工具，不要靠猜。" in stored
+    assert "持久记忆保持轻量、按 topic 管理。" in stored
 
 
 def test_explicit_memory_promotion_rejects_secret_shaped_and_transient_lines(tmp_path):
@@ -2237,19 +2250,21 @@ def test_explicit_memory_promotion_rejects_secret_shaped_and_transient_lines(tmp
     agent.ask("Capture these stable facts into durable memory.")
 
     report = json.loads(agent.run_store.report_path(agent.current_task_state).read_text(encoding="utf-8"))
-    conventions_path = tmp_path / ".codingforme" / "memory" / "topics" / "project-conventions.md"
-    dependency_path = tmp_path / ".codingforme" / "memory" / "topics" / "dependency-facts.md"
+    stored = durable_memory_text(tmp_path)
 
     assert report["durable_promotions"] == [
-        "project-conventions: Use constrained tools instead of guessing.",
+        "project: Use constrained tools instead of guessing.",
     ]
+    # 拒绝归因用的名字和入库用的是同一套（类型名），否则同一条记忆「进了」和
+    # 「被拒了」在工件上会写成两种命名体系。
     assert report["durable_rejections"] == [
-        "dependency-facts:secret_shaped",
-        "key-decisions:transient_task_state",
-        "dependency-facts:noisy_output",
+        "reference:secret_shaped",
+        "project:transient_task_state",
+        "reference:noisy_output",
     ]
-    assert "Use constrained tools instead of guessing." in conventions_path.read_text(encoding="utf-8")
-    assert not dependency_path.exists()
+    assert "Use constrained tools instead of guessing." in stored
+    assert "sk-live-secret-abc" not in stored
+    assert "FAIL test_one" not in stored
 
 
 def test_explicit_memory_promotion_supersedes_matching_durable_fact(tmp_path):
@@ -2264,14 +2279,13 @@ def test_explicit_memory_promotion_supersedes_matching_durable_fact(tmp_path):
     assert agent.ask("Capture this stable dependency fact into durable memory.") == "Dependency: Python runtime is 3.11."
     assert agent.ask("Save the updated dependency fact into durable memory.") == "Dependency: Python runtime is 3.12."
 
-    dependency_path = tmp_path / ".codingforme" / "memory" / "topics" / "dependency-facts.md"
     report = json.loads(agent.run_store.report_path(agent.current_task_state).read_text(encoding="utf-8"))
-    text = dependency_path.read_text(encoding="utf-8")
+    text = durable_memory_text(tmp_path)
 
     assert "Python runtime is 3.12." in text
     assert "Python runtime is 3.11." not in text
     assert report["durable_superseded"] == [
-        "dependency-facts: Python runtime is 3.11. -> Python runtime is 3.12.",
+        "reference: Python runtime is 3.11. -> Python runtime is 3.12.",
     ]
 
 
@@ -2287,10 +2301,13 @@ def test_explicit_memory_promotion_dedupes_duplicate_durable_note(tmp_path):
     agent.ask("Capture the stable fact into durable memory.")
     agent.ask("Capture the stable fact into durable memory again.")
 
-    conventions_path = tmp_path / ".codingforme" / "memory" / "topics" / "project-conventions.md"
-    text = conventions_path.read_text(encoding="utf-8")
+    memory_root = tmp_path / ".codingforme" / "memory" / "topics"
+    bodies = [path.read_text(encoding="utf-8") for path in sorted(memory_root.glob("*.md"))]
 
-    assert text.count("Use constrained tools instead of guessing.") == 1
+    # 同一条事实提升两次，库里仍然只有一个文件——这就是去重。断言文件数而不是
+    # 出现次数：后者会把文件格式（描述行 + 正文各出现一次）也变成契约。
+    assert len(bodies) == 1
+    assert "Use constrained tools instead of guessing." in bodies[0]
 
 
 def test_agent_records_model_cache_metadata_in_last_prompt_metadata(tmp_path):

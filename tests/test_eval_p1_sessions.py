@@ -95,7 +95,7 @@ def test_full_harness_passes_every_session_assertion(tmp_path):
     result = run_session_suite(workspace_root=tmp_path / "ws")
 
     assert failures(result) == {}
-    assert result["aggregates"]["total"] == 14
+    assert result["aggregates"]["total"] == 23
     assert all(case["level"] == LEVEL_SESSION for case in result["cases"])
     assert len({case["case_id"] for case in result["cases"]}) == len(result["cases"])
 
@@ -105,14 +105,32 @@ def test_the_suite_actually_produces_multi_run_sessions(tmp_path):
     result = run_session_suite(workspace_root=tmp_path / "ws")
 
     coverage = result["trace"]["coverage"]
-    assert coverage["multi_run_sessions"] == 5
-    assert coverage["session_count"] == 5
-    # 13 = 四条记忆会话的轮次和；+24 = `long_dialogue_pressure` 那条压力探针
-    assert coverage["run_count"] == 37
+    assert coverage["multi_run_sessions"] == 8
+    assert coverage["session_count"] == 8
+    # 13 = 四条英文记忆会话的轮次和；+10 = 三条中文会话；+24 = `long_dialogue_pressure`
+    # 那条压力探针。中文那三条是阶段一（中文召回）的验收对象。
+    assert coverage["run_count"] == 47
     assert coverage["synthetic_sessions"] == 0
 
 
 # --- 证伪：关掉记忆之后必须挂在该挂的地方 ------------------------------------
+
+
+def test_disabling_cjk_recall_fails_exactly_the_chinese_recall_assertions(tmp_path):
+    """阶段一的证伪证据：关掉中文分词，挂的必须**只是**中文那三条。
+
+    没有这条，中文任务全绿既可能是「中文召回成立了」，也可能是「这三条任务本来
+    就用别的途径通过了」——两者在报告上长得一模一样。
+    """
+    full = run_session_suite(harness=get_harness("full"), workspace_root=tmp_path / "full")
+    ascii_only = run_session_suite(harness=get_harness("no_cjk_recall"), workspace_root=tmp_path / "ascii")
+
+    assert failures(full) == {}
+    broken = failures(ascii_only)
+    assert broken, "关掉中文召回之后一条都没挂，说明中文任务根本没在测中文召回"
+    assert all(case_id.endswith("_zh") or "_zh:" in case_id for case_id in broken), broken
+    # 英文那四条会话一条都不许被连坐。
+    assert not any(case_id.startswith(("recall_build_command:", "aggregate_lint_and_dependency:")) for case_id in broken)
 
 
 def test_disabling_memory_fails_exactly_the_recall_assertions(tmp_path):
@@ -122,7 +140,8 @@ def test_disabling_memory_fails_exactly_the_recall_assertions(tmp_path):
 
     assert failures(full) == {}
     broken = failures(none)
-    assert len(broken) == 4
+    # 4 条英文 + 3 条中文召回断言。关掉记忆之后它们全挂，其余一条不动。
+    assert len(broken) == 7
     assert all(case_id.endswith(":session_evidence_surfaced") for case_id in broken)
     # 归因要说清「什么没带回来」，而不只是「不通过」。
     for detail in broken.values():
