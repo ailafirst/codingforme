@@ -179,19 +179,25 @@ def test_session_suite_declares_the_execution_mode_it_actually_ran_in(tmp_path):
     不传 execution_mode 会默认成 oracle-replay，于是一次真实模型跑批被标成参考解
     回放，报告还会渲染出「capability 轴评的是参考解」这段假声明。
     """
-    from codingforme.eval.session_suite import DEFAULT_SESSION_BENCHMARK_PATH, run_session_suite
+    import json
+
+    from codingforme.eval.session_suite import DEFAULT_SESSION_BENCHMARK_PATH, load_session_benchmark, run_session_suite
     from codingforme.models import FakeModelClient
 
-    scripted = run_session_suite(
-        benchmark_path=DEFAULT_SESSION_BENCHMARK_PATH,
-        workspace_root=tmp_path / "scripted",
-    )
+    # 只取一条最小的会话：这个用例问的是 run_context 的口径字段，跑满 16 条会话
+    # （其中两条各 100 轮）纯属浪费，而且注入的 FakeModelClient 得备够 100 个输出。
+    benchmark = load_session_benchmark(DEFAULT_SESSION_BENCHMARK_PATH)
+    tiny = dict(benchmark, tasks=[task for task in benchmark["tasks"] if task["id"] == "recall_build_command"])
+    path = tmp_path / "tiny.json"
+    path.write_text(json.dumps(tiny, ensure_ascii=False), encoding="utf-8")
+
+    scripted = run_session_suite(benchmark_path=path, workspace_root=tmp_path / "scripted")
     assert scripted["run_context"]["execution_mode"] == EXECUTION_MODE_ORACLE_REPLAY
 
     injected = run_session_suite(
-        benchmark_path=DEFAULT_SESSION_BENCHMARK_PATH,
+        benchmark_path=path,
         workspace_root=tmp_path / "injected",
-        model_client_factory=lambda *a, **k: FakeModelClient([final_answer("ok")] * 40),
+        model_client_factory=lambda *a, **k: FakeModelClient([final_answer("ok")] * 8),
     )
     assert injected["run_context"]["execution_mode"] == EXECUTION_MODE_LIVE_MODEL
 

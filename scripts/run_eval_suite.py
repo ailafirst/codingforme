@@ -115,6 +115,16 @@ def build_arg_parser():
             "real model cannot finish inside. Pass 0 to fall back to the dataset's declared value."
         ),
     )
+    parser.add_argument(
+        "--session-tier",
+        default="core",
+        choices=("core", "extended", "all"),
+        help=(
+            "which cross-session tier to run. core (default) is the always-on regression net; "
+            "extended holds the 200/300-turn recall ladder, whose answer only changes when the "
+            "memory layer changes and which costs one ask() per turn."
+        ),
+    )
     parser.add_argument("--request-timeout", type=int, default=180, help="per-request timeout for the live model")
     parser.add_argument(
         "--repeats",
@@ -185,8 +195,11 @@ def main(argv=None):
             result_path=result_path,
             markdown_path=markdown_path,
             model_client_factory=model_client_factory,
+            tiers=None if args.session_tier == "all" else (args.session_tier,),
         )
     else:
+        if args.session_tier != "core":
+            raise SystemExit("--session-tier only applies to the cross-session suite")
         result = run_benchmark_suite(
             harness=harness,
             benchmark_path=Path(args.benchmark) if args.benchmark else Path("benchmarks/coding_tasks.json"),

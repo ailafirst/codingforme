@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from codingforme.eval.harness import DEFAULT_HARNESS, get_harness
-from codingforme.eval.report import LEVEL_SESSION
+from codingforme.eval.report import LEVEL_SESSION, LEVEL_TRAJECTORY
 from codingforme.eval.scorers import rendered_notes, score_session, session_cases
 from codingforme.eval.session_suite import (
     DEFAULT_SESSION_BENCHMARK_PATH,
@@ -55,7 +55,8 @@ def test_session_benchmark_covers_the_four_question_types():
     assert QUESTION_TYPES <= {task["question_type"] for task in benchmark["tasks"]}
     for task in benchmark["tasks"]:
         assert len(task["turns"]) >= 2, "跨会话任务至少要两轮，否则测的还是单轮"
-        assert any(turn.get("expect") for turn in task["turns"]), f"{task['id']} 没有任何断言"
+        declared = task.get("asserts") or [turn for turn in task["turns"] if turn.get("expect")]
+        assert declared, f"{task['id']} 没有任何断言"
 
 
 def test_expectations_are_keyed_by_run_seq():
@@ -95,8 +96,14 @@ def test_full_harness_passes_every_session_assertion(tmp_path):
     result = run_session_suite(workspace_root=tmp_path / "ws")
 
     assert failures(result) == {}
-    assert result["aggregates"]["total"] == 23
-    assert all(case["level"] == LEVEL_SESSION for case in result["cases"])
+    by_level = result["aggregates"]["by_level"]
+    # L3 是会话断言，L1 是逐次运行的轨迹断言。跨会话套件现在两层都跑：形状是
+    # 「一次运行」的判据（patch 前读没读、有没有重复读没变过的文件）写成会话断言
+    # 反而别扭，而在这之前它们写了也不会被执行——这里只跑 SESSION_CHECKS 那几条。
+    assert by_level[LEVEL_SESSION]["total"] == 56
+    assert by_level[LEVEL_TRAJECTORY]["total"] == 1349
+    assert result["aggregates"]["total"] == 1405
+    assert {case["level"] for case in result["cases"]} == {LEVEL_SESSION, LEVEL_TRAJECTORY}
     assert len({case["case_id"] for case in result["cases"]}) == len(result["cases"])
 
 
@@ -105,11 +112,13 @@ def test_the_suite_actually_produces_multi_run_sessions(tmp_path):
     result = run_session_suite(workspace_root=tmp_path / "ws")
 
     coverage = result["trace"]["coverage"]
-    assert coverage["multi_run_sessions"] == 8
-    assert coverage["session_count"] == 8
+    assert coverage["multi_run_sessions"] == 20
+    assert coverage["session_count"] == 20
     # 13 = 四条英文记忆会话的轮次和；+10 = 三条中文会话；+24 = `long_dialogue_pressure`
-    # 那条压力探针。中文那三条是阶段一（中文召回）的验收对象。
-    assert coverage["run_count"] == 47
+    # 那条压力探针；+233 = 头八条长期任务会话（20 + 100 + 100 + 3 + 3 + 2 + 3 + 2）；
+    # +100 = 后补的四条 >=20 轮长期任务（24 + 26 + 24 + 26）。200/300 轮那两条在
+    # extended 档，默认不加载，所以不在这个数里。
+    assert coverage["run_count"] == 380
     assert coverage["synthetic_sessions"] == 0
 
 
@@ -140,9 +149,14 @@ def test_disabling_memory_fails_exactly_the_recall_assertions(tmp_path):
 
     assert failures(full) == {}
     broken = failures(none)
-    # 4 条英文 + 3 条中文召回断言。关掉记忆之后它们全挂，其余一条不动。
-    assert len(broken) == 7
+    # 4 条英文 + 3 条中文召回断言，再加 3 条长期任务（20 轮 / 100 轮 / 100 轮禁令）。
+    # 关掉记忆之后它们全挂，其余一条不动。
+    assert len(broken) == 10
     assert all(case_id.endswith(":session_evidence_surfaced") for case_id in broken)
+    # 20 轮那条是 100 轮那条的对照组：两条同时挂说明召回本身不成立（这里正是这种
+    # 情况——记忆整个被关掉了）；只有 100 轮那条挂才说明是长度造成的。
+    assert "long_horizon_spec_recall_20:session_evidence_surfaced" in broken
+    assert "long_horizon_spec_recall_100:session_evidence_surfaced" in broken
     # 归因要说清「什么没带回来」，而不只是「不通过」。
     for detail in broken.values():
         offender = detail["offenders"][0]

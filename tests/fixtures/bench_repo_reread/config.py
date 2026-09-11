@@ -1,0 +1,5 @@
+"""Service configuration. CONFIG-MARK-4B1D"""
+
+RETRY_LIMIT = 7
+QUEUE_DEPTH = 512
+SHUTDOWN_GRACE_SECONDS = 45

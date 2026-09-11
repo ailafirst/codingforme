@@ -171,6 +171,12 @@ class RunRecord:
     report: dict = field(default_factory=dict)
     task_state: dict = field(default_factory=dict)
     synthetic_session: bool = False
+    # 同一条会话里排在它前面的那些运行，按 run_seq 升序，由 `_group_sessions()` 回填。
+    # 加它是因为 `session["history"]` 是跨 ask() 持久化的：模型在第 2 次运行里看得见
+    # 第 1 次读过的文件内容，所以「patch 前读没读过」「折叠掉的重复读对不对得上」这类
+    # 判据只看本次运行会得出错误结论——固定基准每个任务一次运行，看不出来；跨会话套件
+    # 一上来就把它照了出来（脚本明明先读后改，`read_before_patch` 照样报挂）。
+    prior_runs: list = field(default_factory=list)
 
     @property
     def task_id(self):
@@ -393,6 +399,8 @@ def _group_sessions(run_records, session_states):
     sessions = []
     for session_id in sorted(grouped):
         runs = sorted(grouped[session_id], key=lambda item: (item.run_seq, item.started_at, item.run_id))
+        for index, run in enumerate(runs):
+            run.prior_runs = runs[:index]
         sessions.append(
             SessionRecord(
                 session_id=session_id,
