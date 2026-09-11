@@ -109,6 +109,49 @@ behavior: `cjk_recall`, `durable_index_cap`, `memory_types` (on by default) and
 `memory_extractor`, `memory_consolidator` (off by default). New assertions need a
 falsification test proving the flag's off-state fails exactly those assertions.
 
+## Long-Horizon Session Cases
+
+`benchmarks/session_tasks.json` holds one session per task (N calls to `ask()`).
+Beyond the four LongMemEval question types it now carries twelve long-horizon
+cases in three families: does a fact stated on turn 1 survive to turn 100
+(`long_horizon_recall`), does the agent re-read a file that has not changed
+(`redundant_work`), and does it act on content that a later write invalidated
+(`stale_information`).
+
+Tasks carry a `tier`: `core` (the default, and the value assumed when the field
+is absent) or `extended`. `extended` holds the 200- and 300-turn rungs of the
+recall ladder, whose answer only changes when the memory layer changes and which
+cost one `ask()` per turn; select with `--session-tier core|extended|all`.
+Validation always runs over every tier before the filter, so a mistyped fixture
+path in an `extended` task still fails at load time.
+
+Rules when adding to this file:
+
+- **At least two cases per family, with different shapes.** A single case that
+  fails cannot distinguish "the mechanism broke" from "this one fixture stopped
+  triggering it" — and a probe that has lost its subject looks exactly like a
+  healthy mechanism in the report.
+- **Pair a long case with a short control, and keep the control in `core`.**
+  `long_horizon_spec_recall_20` exists so that a failure of the 100-turn case can
+  be attributed to length rather than to recall being broken outright; moving it
+  to `extended` would take that distinction out of the default run. Every rung of
+  the ladder must share the first request and the final turn byte for byte.
+- **A long-horizon case is at least twenty turns.** Anything shorter is a
+  regression test for the mechanism, not for the horizon.
+- **Declare what the case exercises.** A task asserts through per-turn `expect`
+  keys, or through a task-level `asserts` list naming L1 assertions it must make
+  applicable; the suite emits a failing `asserts_declared` case when a named
+  assertion never fires. Unknown names are rejected at load time.
+- Optional task fields: `fixture_repo` (copied, never used in place), per-turn
+  `context_evidence` (the only channel that can answer "is turn 1's text still in
+  the prompt at turn 100"), and `max_steps`.
+
+The suite runs both `SESSION_CHECKS` and `TRAJECTORY_CHECKS`; `by_level` splits
+`L3-session` from `L1-trajectory`. Assertions that reason about what the model has
+already seen must read `RunRecord.prior_runs`, because `session["history"]`
+outlives a single `ask()` — `read_before_patch` and `read_ranges_preserved` both
+had to be corrected for this, and the single-run fixed benchmark cannot expose it.
+
 ## Testing Guidelines
 
 Add focused `pytest` coverage for behavior changes. Name test files

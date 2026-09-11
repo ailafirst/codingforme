@@ -4,9 +4,74 @@
 
 ## [未发布]
 
-这一版改的是**记忆层**。参照系是从 Claude Code 可执行文件里提取出来的那套机制(调研见 `docs/architecture/claude-code-memory-research.md`,施工图见 `docs/architecture/memory-implementation-spec.md`),但有三处刻意不抄,理由都写在下面。
+这一版有四块:**记忆层**、**跨会话测试集的扩充**、**提示词变体轴**,以及 REPL 流式输出的两个修复。
 
-### 新增
+### 新增 — 提示词现在是一条可对照的轴
+
+在这之前提示词是模块级常量,改一句措辞只让 `prompt_template_signature()` 换个指纹值,**没有办法让新旧两版进同一次对照**——「这句话改得对不对」在整套评测里是不可回答的。
+
+- **`HarnessSpec.prompt_variant`**,取自 `runtime.PROMPT_VARIANTS`,三版:`current` / `pre_phase3` / `pre_phase1`。对应两个新变体 `prompt_pre_phase3` / `prompt_pre_phase1`,`BUILTIN_HARNESS_SPECS` 从 22 个变成 24 个。名字写错在**构造期**就报错,不静默退回默认模板——静默退回的话整批跑批看起来跑了对照臂、实际两臂完全相同。
+- **一版提示词 = 模板 + 各工具描述后面追加的那句话**(`PromptVariant.template` / `.tool_guidance`),两者捆在一起换,签名哈希两者。只换模板不换附文的话,对照臂会同时带着旧规则块和新工具描述,同一条建议出现两遍,测的就不是任何一版真实存在过的提示词。变体存的是**整份模板**而不是「在当前模板上打补丁」,否则下次再改一句措辞,对照臂会跟着当前模板一起漂。
+- **per-tool 的用法规则搬进工具描述**(`runtime.PHASE3_TOOL_GUIDANCE`,由 `tools.build_tool_registry()` 追加在 `BASE_TOOL_SPECS[...]["description"]` 后面)。兑现的是**结构性保证**不是行为收益:「凡是点名某个工具的文案都要按 `agent.tools` 现算」这条硬约束之所以存在是因为踩过——任务白名单把注册表裁到只剩两三个工具,硬写的规则仍然指着 `write_file` 说话,模型照做只拿回一句 `unknown tool`。写进工具描述之后,**工具不在注册表里,那段文字结构上就不存在了**,不需要任何人记得去现算。
+- **`scripts/compare_eval_ab.py`**:两份评测工件并排成对照表,逐条断言 + Fisher 精确检验 + 可比性检查(两臂是不是只差了一个变量)。
+
+**token 账(渲染后的 prefix,6 个工具全开)**:
+
+| 版本 | 规则块 | 工具清单 | `tools=` schema | 每轮合计 | 跨任务公共前缀 |
+|---|---|---|---|---|---|
+| `pre_phase1` | 338 | 352 | 1,213 | 1,903 | 202 |
+| `pre_phase3` | 388 | 352 | 1,213 | 1,953 | 235 |
+| `current` | **304** | 421 | 1,282 | **2,007** | **308** |
+
+「跨任务公共前缀」是两个真实基准白名单(`read_file+patch_file` vs `read_file+write_file+list_files`)的 system 消息逐字符比出来的,是唯一不受轨迹混杂的缓存度量。**代价要认账:每轮 +54 token**——搬进描述的文字出现两次(prefix 的工具清单 + `tools=` 的 JSON schema)。
+
+**live A/B(k=1,15 任务)一条断言都没测出区别**(`no_redundant_reread` 2/4 → 5/7,p=0.5758;`no_repeated_calls` 11/13 → 12/13,p=1.0000),原因和阶段二那次相同:目标断言每臂只有 4~7 次适用判定。**别拿这份基准去论证措辞级改动**。
+
+顺带修了两条标定:`test_squeezed_entries_are_counted_apart_from_dropped_ones` 与 `test_turning_reversible_squeeze_off_drops_the_entry_instead_of_stubbing_it` 都写死了 `total_budget=4823`,而压扁的边界由 `total_budget − prefix − 其余段落` 决定——prefix 短了 84 个 token,边界就挪过去了,两条测试挂在「压扁数是 0」上而机制一点没坏。改成扫一个预算梯子找第一个同时压扁又丢弃的档位。**凡是拿 `total_budget` 卡边界的测试,写死的那个数都是对着当时的 prefix 标定的**,改提示词要重标,不是改断言。
+
+### 修复 — REPL 看起来「不流式」,而且答案打印两遍
+
+两个独立的 bug,都在 CLI 这一层。
+
+- **思维链增量被整批丢弃**。实测这个后端(mimo-v2.5):第一条 SSE 事件 18.30s 到达,随后 **70 条 `reasoning_content`**(18.37s → 22.90s),22.90s 才出现第一条 `content`(243 条,到 36.55s 结束)。旧代码只读 `delta.content`,于是那 4.6 秒屏幕全黑,而后端一直在推。`_CompatBackendCustomLLM.streaming()` 现在解析 `reasoning_content`,经宿主 client 上的旁路回调 `_reasoning_sink` 推给调用方,`complete()` / `CodingForMe` / `build_agent` 一路新增 `on_reasoning=` 参数。**不能借 `GenericStreamingChunk.text` 回传**——那会把思维链混进答案正文;**也不给 `on_token` 加一个 `kind` 参数**——既有调用方(含测试)传的是单参回调。
+- **最终答案渲染两遍**。`on_token` 边生成边打印之后,`show()` 又把同一段文本渲染进圆角框。现在只在「流出去的文本尾部就是最终答案」时跳过圆角框,改用开放式分节线收尾——判据不能是「这一轮有没有流过东西」:中间轮次可能既带 `tool_calls` 又带正文,那时流出去的和最终答案并不是同一段,按后者判会让真正的答案永远不出现(反例已锁进测试)。
+
+**首次可见输出从 82.9s 提前到 21.6s。** 17~18 秒的首 token 闸门是后端的,消不掉;长输出对照(240 事件、首条 17.65s、之后 14.8s 匀速)排除了缓冲假说。
+
+### 新增 — 长期任务测试集(8 条会话)
+
+跨会话套件在这之前的 8 条会话里,7 条是纯对话、模型输出全部写死在数据集里,数据集自己标着 `evaluated_object: harness`;15 个单轮任务的参考解最长 14 步、中位 4 步。也就是说「超长会话里第一轮的话还记不记得」「会不会重复读一个没变过的文件」「会不会照着旧信息动手」这三件事,**一个 case 都没有**。这次各补至少两条。
+
+- **`long_horizon_recall`(3 条)**。`long_horizon_spec_recall_100`:第 1 轮立一条带唯一标记串的规格,98 轮噪声,第 100 轮问回来。`long_horizon_spec_recall_20`:**同一条事实、同一个问法,只有轮数不同**——它是对照组,两条同时挂说明召回本身不成立,只有 100 轮那条挂才说明是长度造成的。`long_horizon_constraint_retained_100`:第 1 轮立的是**禁令**而不是事实(`vendor/` 下不许改),事实丢了和约束失效在报告上长得一样而修法相反。
+- **`redundant_work`(2 条)**。`reread_after_unrelated_calls` 把两次读分在两次运行里,`reread_across_restart` 把读→改→再读放在同一次运行内——分别是跨运行和运行内那两条断言的作用对象,写成同一个形状的话其中一条在整份数据集上一次都不会产出。
+- **`stale_information`(3 条)**。`stale_patch_anchor`(窗口内的过期读,第二处改动的锚点绕不开第一处)、`stale_read_across_runs`(读、写、再读分在三次运行里,含进程重启)、`stale_spill_pointer`(窗口外的过期落盘指针:`src/core.py` 整份读 1,784 token > 单条上限 1,320 必然落盘,再被 patch,再被十次小读挤出窗口)。
+- **四条新断言**。`no_redundant_reread`(运行内,subject `model`)与 `no_redundant_reread_across_runs`(跨运行含 resume,subject `harness`)补的是 `no_repeated_calls` 覆盖不到的那一半——闸口的 `repeated_tool_call()` 只看历史里最后两条工具记录,中间隔一个别的调用就查不到,而真实浪费恰恰是「读 a → 读 b → 读 c → 又读 a」这个形状。三条豁免(内容变了 / 落过盘 / 已掉出最近窗口)取 `affected_paths`,**来自工作区快照的 sha256 差异而不是 args 里的 path**,否则 `run_shell` 改的文件和失败的写都判错。`stale_reads_flagged` 让数据集声明 `stale_reads_min` / `stale_pointers_min`(两个数分开,合成一个会让其中一半没跑起来被另一半盖过去);`forbidden_paths_untouched` 判整条会话有没有碰过第 1 轮点名禁止的路径。
+- **跨会话套件现在也跑 L1**(`score_index` + `trajectory_cases`),`by_level` 分 `L3-session` / `L1-trajectory` 两个桶。规模从 8 条会话 / 47 次运行 / 23 条断言变成 **16 条 / 280 次 / 980 条**。
+- **数据集三个新的可选字段**:`fixture_repo`(样板仓库复制进会话工作区)、逐轮 `context_evidence`(「第 1 轮的规格到第 100 轮还在不在 prompt 里」唯一的观测通道)、`max_steps`。外加任务级 `asserts`:声明这条 case 存在是为了让哪几条 L1 断言真的判一次,断言没产出时套件当场记一条失败的 `asserts_declared` case——「探针失去作用对象」这个坑从单测搬进了跑批。
+- **`tests/test_long_horizon_cases.py`(21 条)**:契约、适用性、以及手搓违规轨迹的证伪。
+
+**证伪证据(全部 16 条会话跑满)**:`no_memory` 挂 10 条(7 条原有召回 + 3 条长期召回,含 20 轮那条对照);`no_stale_read` 恰好挂 `stale_*` 那 3 条;`no_tool_output_spill` 恰好挂 `stale_spill_pointer` 一条。**`no_session_summary` 和 `no_window_block` 一条都不挂**——这是实测结论不是遗漏:100 轮那条事实是长期记忆扛下来的,和会话摘要无关。
+
+### 新增 — 召回阶梯扩到 300 轮,长期任务补到 12 条,会话套件分档
+
+- **召回阶梯补两档**:`long_horizon_spec_recall_200` / `_300`。四档(20 / 100 / 200 / 300)是同一条事实、同一个问法,第 1 轮请求与最后一轮逐字节相同,差的只有长度——不这样的话「第几档开始挂」这个读数就不是长度造成的。
+- **四条 ≥20 轮的长期任务**,把另外两类也做出长会话版:`long_horizon_reread_across_runs_24` / `long_horizon_reread_in_run_26`(验 `prior_runs` 攒到二十几条时三条豁免还认不认得出来)、`long_horizon_stale_anchor_24` / `long_horizon_stale_pointer_26`(**读与改必须排在会话末尾、相邻**——过期读的判定单位是工具轮,把读放在开头它早就掉出窗口被清成占位,`stale_read_count` 恒为 0,那时这条 case 测的是它的反面)。
+- **会话套件分 `core` / `extended` 两档**(`--session-tier core|extended|all`,数据集字段 `tier`,不写算 `core`)。理由是成本不是重要性:一条 300 轮会话就是 300 次 `ask()`,而它的答案只在记忆层改动时才会变。两档走同一个执行器、同一批断言、同一份 schema;**校验永远跑在过滤之前**,写错 fixture 路径的 extended 任务照样在加载期报错;档位落进 `dataset.tiers`。**20 轮那条对照组留在 `core`**,挪走的话默认跑批里 100 轮那条挂掉时又分不清是「召回不成立」还是「长度造成的」。
+- 规模:`core` 档 **20 条会话 / 380 次运行 / 1405 条判例**(此前 16 / 280 / 980),`extended` 档 2 条 / 500 次 / 1506 条。两档 0 失败。**新增的 500 次运行全在 `extended`,所以测试没再慢一截**:全量 pytest 525 条 / 1,148 秒(此前 521 条 / 1,192 秒)。
+
+**证伪(`core` 档跑满)**:`no_memory` 挂 10 条(不变——新增的四条不断言召回);`no_stale_read` 恰好挂 `stale_*` 那 **5** 条;`no_tool_output_spill` 恰好挂两条落盘指针 case;`no_cjk_recall` 恰好挂中文那 3 条会话(4 条断言);**`no_session_summary` / `no_window_block` 仍然一条都不挂**——补了 ≥20 轮的 case 之后依然如此,长会话里那条事实是长期记忆扛下来的。
+
+**300 轮没断,但原因不是「记得牢」。** 300 轮那条跑完工作区里有 **300 份 durable 记忆**(每轮噪声都被提升成一条),注入的索引只放得下 **10 / 299 条**(截断 289、374 token,上限 400),而排序把目标放在 `rendered_notes` 第 1 位——100 轮与 300 轮这组数字**逐字段相同**。噪声全是 reporting / renderer / rows 那批词,最后一问用的是 request timeout / tag,词面不重叠,**轮数不是绑定变量**。别把这条读成「召回能扛任意深度」。额外探针把两个方向各推一步也都没断:500 轮目标仍排第 1;把干扰换成同话题(共用 `for every service` / `milliseconds` / `filed under` / `tag`)在 20/50/100 轮上目标也仍排第 1。**绑定变量是「问句里有没有目标独有的词」**——现成反例是 `long_horizon_constraint_retained_100` 第一版,最后一问不含 `vendor` 就召不回来。
+
+### 修复 — 两条 L1 断言在多轮会话上恒挂
+
+`read_before_patch` 和 `read_ranges_preserved` 都只扫本次运行,而 `session["history"]` 是跨 `ask()` 持久化的:第 2 轮 patch 一个第 1 轮读过的文件,内容仍然在模型眼前,不是在猜;`collapsed_duplicate_reads` 更是 ContextManager 对整条 history 算出来的,只数本次运行的读会让分母恒小于它。修法是给 `RunRecord` 加 `prior_runs`(同一条会话里排在它前面的运行),两条断言的起始集合从那里取。**固定基准每个任务只有一次运行,所以这个错法在那边看不出来**——接进跨会话套件的第一次跑批就报了 7 条挂。
+
+### 记忆层
+
+这一块参照系是从 Claude Code 可执行文件里提取出来的那套机制(调研见 `docs/architecture/claude-code-memory-research.md`,施工图见 `docs/architecture/memory-implementation-spec.md`),但有三处刻意不抄,理由都写在下面。
+
+#### 新增
 
 - **检索分词认中文了(阶段一,`cjk_recall`,默认开)**。`memory._tokenize()` 在 `[A-Za-z0-9_]+` 之外追加中日韩**相邻两字的组合**(「构建命令」→ 构建/建命/命令)。在这之前,中文笔记**结构上**召不回来——`benchmarks/session_tasks.json` 里那句「关键词一律用英文」就是在为这个洞让路。不引分词库是因为运行时依赖只有 litellm 那条硬约束(词表同样是数据文件);不用单字是因为「的」「是」会命中一切。数据集新增三条中文会话(`recall_build_command_zh` / `aggregate_lint_and_dependency_zh` / `update_indentation_convention_zh`),跨会话套件从 5 条会话 14 条断言变成 8 条会话 23 条断言。**证伪证据**:`no_cjk_recall` 变体下 `session_evidence_surfaced` 从 7/7 掉到 4/7、`supersede_recorded` 从 2/2 掉到 1/2,挂的恰好是中文那三条,英文四条一条不动。
 - **副作用一并修好:中文事实现在会互相覆盖了**。主语键 `_subject_key()` 和召回共用同一个分词,所以中文一开,「缩进是 4 个空格」→「缩进是 2 个空格」的覆盖语义从**永不生效**变成生效。英文侧的键必须逐字节不变,由测试锁住。
@@ -20,7 +85,7 @@
 - **五个新变体**:`no_cjk_recall`、`no_durable_index_cap`、`no_memory_types`(关掉上面三个机制)、`memory_extractor`、`memory_consolidator`(打开默认关闭的那两个)。`BUILTIN_HARNESS_SPECS` 从 17 个变成 22 个。
 - **`tests/test_memory_phases.py`(27 条)**:每个阶段一组「机制生效」加一组「关掉开关必须恰好挂」的证伪断言。
 
-### 破坏性改动
+#### 破坏性改动
 
 - **长期记忆的磁盘格式从 v1 换成 v2**,旧库在第一次写入时自动迁移(带整目录备份)。旧的 `topics/project-conventions.md` 这类文件不再存在,内容拆成了一条一个文件。
 - **`durable_promotions` / `durable_rejections` / `durable_superseded` 里的前缀从主题 slug 换成类型名**(`project-conventions:` → `project:`,`dependency-facts:` → `reference:`)。两个固定基准任务(`durable_promotion_accept` / `durable_promotion_reject`)的判定跟着改了;`durable_promotion_accept` 现在查索引文件而不是某个主题文件——文件名由内容 slug 出来,把它写进判定等于把命名也变成契约。
