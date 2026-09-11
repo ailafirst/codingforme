@@ -3171,3 +3171,80 @@ def test_compact_is_discoverable_from_help_and_the_welcome_hint():
 
     assert "/compact" in HELP_DETAILS
     assert "/compact" in WELCOME_HINT
+
+
+def test_reasoning_deltas_reach_the_caller_instead_of_being_dropped():
+    """推理模型的思维链增量必须有去处，否则用户对着空屏幕多等一段。
+
+    实测这个后端：18.30s 收到第一条事件、随后 70 条 `reasoning_content`，
+    22.90s 才出现第一条 `content`。在这条通道接上之前，中间那 4.6 秒里后端
+    一直在推送，而我们全部丢弃——症状和「根本没有流式」分不出来。
+
+    同时锁住它**不许混进正文**：思维链走一个独立回调，`text` 里只能有答案。
+    """
+    lines = [
+        b'data: {"choices":[{"delta":{"role":"assistant"},"index":0}]}\n',
+        b'data: {"choices":[{"delta":{"reasoning_content":"let me "},"index":0}]}\n',
+        b'data: {"choices":[{"delta":{"reasoning_content":"think"},"index":0}]}\n',
+        b'data: {"choices":[{"delta":{"content":"42"},"index":0}]}\n',
+        b'data: {"choices":[{"delta":{},"finish_reason":"stop","index":0}],'
+        b'"usage":{"prompt_tokens":20,"completion_tokens":4,"total_tokens":24}}\n',
+        b"data: [DONE]\n",
+    ]
+    client = OpenAICompatibleModelClient(
+        model="right.codes/codex-mini",
+        base_url="https://right.codes/v1",
+        api_key="sk-test",
+        temperature=0.2,
+        timeout=30,
+    )
+    tokens, reasoning = [], []
+    with patch("urllib.request.urlopen", return_value=_FakeStreamResponse(lines)):
+        result = client.complete("q", 42, on_token=tokens.append, on_reasoning=reasoning.append)
+
+    assert reasoning == ["let me ", "think"]
+    assert tokens == ["42"]
+    assert result == {"text": "42", "tool_calls": None}
+    # 用完即清：handler 注册在 litellm 的全局表里，回调留在那儿会让后续调用
+    # 继续往一个早就没人听的地方推送。
+    assert client._reasoning_sink is None
+
+
+def test_a_fully_streamed_answer_is_not_printed_a_second_time(tmp_path, monkeypatch, capsys):
+    """流式打印过的答案不能再进一次圆角框——那在屏幕上就是同一段话出现两次。
+
+    这是实测报上来的「重新输出」：`on_token` 边生成边打印，`show()` 收尾时又把
+    同一段文本渲染进框里。判据是「流出去的文本尾部就是最终答案」，而不是「这轮
+    有没有流过东西」：中间轮次可能既带 tool_calls 又带正文，按后者判会让真正的
+    答案永远不出现——所以这里连反例一起锁。
+    """
+    from codingforme import cli
+
+    (tmp_path / "README.md").write_text("hi\n", encoding="utf-8")
+
+    class StreamingFake(FakeModelClient):
+        """把脚本化输出的正文当成 SSE 增量喂给 on_token。"""
+
+        def complete(self, messages, max_new_tokens, **kwargs):
+            result = super().complete(messages, max_new_tokens)
+            on_token = kwargs.get("on_token")
+            if on_token and result.get("text"):
+                for piece in result["text"]:
+                    on_token(piece)
+            return result
+
+    def run(outputs):
+        monkeypatch.setattr(cli, "_build_model_client", lambda _args: StreamingFake(outputs))
+        capsys.readouterr()
+        cli.main(["--cwd", str(tmp_path), "--approval", "never", "go"])
+        return capsys.readouterr().out
+
+    out = run([final_answer("the answer")])
+    assert out.count("the answer") == 1, out
+
+    # 反例：最终答案和流出去的那段不是同一回事时，框必须照旧渲染。
+    out = run([
+        {"text": "thinking out loud", "tool_calls": [{"name": "list_files", "args": {}}]},
+        final_answer("different answer"),
+    ])
+    assert "different answer" in out

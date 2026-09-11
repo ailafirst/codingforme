@@ -837,6 +837,14 @@ class _CompatBackendCustomLLM(CustomLLM):
         一次性把结果当成"一个 chunk"回放给调用方——不堆两套怪癖兼容逻辑。
         """
         payload = {"model": model, "messages": messages, "stream": True, "stream_options": {"include_usage": True}}
+        # 思维链增量的去处。推理模型在吐第一个 `content` 之前会先推一批
+        # `reasoning_content`（实测这个后端：18.30s 收到第一条事件、随后 70 条
+        # 思维链，22.90s 才出现第一条 content）——丢掉它们，用户就要对着空屏幕
+        # 多等那 4.6 秒，而后端其实一直在推送。它不能借 GenericStreamingChunk
+        # 的 `text` 字段回传：那会把思维链混进答案正文里。所以走宿主 client 上
+        # 的一个旁路回调，只在 `complete(on_reasoning=...)` 期间非空。
+        owner = getattr(self, "owner", None)
+        reasoning_sink = getattr(owner, "_reasoning_sink", None) if owner is not None else None
         for key in ("temperature", "max_tokens", "tools", "tool_choice"):
             if optional_params.get(key) is not None:
                 payload[key] = optional_params[key]
@@ -878,6 +886,10 @@ class _CompatBackendCustomLLM(CustomLLM):
                 choices = event.get("choices") or []
                 if choices:
                     delta = choices[0].get("delta") or {}
+                    if reasoning_sink is not None:
+                        reasoning = delta.get("reasoning_content")
+                        if isinstance(reasoning, str) and reasoning:
+                            reasoning_sink(reasoning)
                     content = delta.get("content")
                     if isinstance(content, str) and content:
                         yield {
@@ -988,6 +1000,9 @@ class OpenAICompatibleModelClient:
         # 答案，只会一直被逼着调工具直到步数耗尽。
         self.pending_tool_choice = None
         self.last_completion_metadata = {}
+        # 思维链增量的旁路回调。只在 complete(on_reasoning=...) 期间非空，
+        # 由注册进 litellm 的 handler 在解析 SSE 时读取。
+        self._reasoning_sink = None
         # provider 名字带 id(self)，是为了在同一进程里可能存在多个
         # OpenAICompatibleModelClient 实例时（比如测试），互不覆盖彼此在
         # litellm 全局 custom_provider_map 里注册的 handler。
@@ -995,9 +1010,16 @@ class OpenAICompatibleModelClient:
         litellm.custom_provider_map = [
             item for item in (litellm.custom_provider_map or [])
             if item.get("provider") != self._provider_name
-        ] + [{"provider": self._provider_name, "custom_handler": _CompatBackendCustomLLM()}]
+        ] + [{"provider": self._provider_name, "custom_handler": self._build_stream_handler()}]
 
-    def complete(self, messages, max_new_tokens, prompt_cache_key=None, prompt_cache_retention=None, tools=None, on_token=None):
+    def _build_stream_handler(self):
+        # handler 要能回指到本 client，才拿得到思维链旁路回调。不改它的
+        # __init__ 签名是刻意的：CustomLLM 是 litellm 的基类，构造参数不归我们管。
+        handler = _CompatBackendCustomLLM()
+        handler.owner = self
+        return handler
+
+    def complete(self, messages, max_new_tokens, prompt_cache_key=None, prompt_cache_retention=None, tools=None, on_token=None, on_reasoning=None):
         """向 OpenAI-compatible 后端发起一次模型调用，经由 litellm 传输。
 
         为什么存在：
@@ -1052,7 +1074,13 @@ class OpenAICompatibleModelClient:
         if on_token is None:
             text, raw_tool_calls, usage = self._complete_blocking(kwargs)
         else:
-            text, raw_tool_calls, usage = self._complete_streaming(kwargs, tools, on_token)
+            self._reasoning_sink = on_reasoning
+            try:
+                text, raw_tool_calls, usage = self._complete_streaming(kwargs, tools, on_token)
+            finally:
+                # 用完即清：handler 注册在 litellm 的全局表里，回调留在那儿会让
+                # 后续调用继续往一个早就没人听的地方推送。
+                self._reasoning_sink = None
 
         cached_tokens = int(usage.get("cached_tokens") or 0)
         if cached_tokens > 0:

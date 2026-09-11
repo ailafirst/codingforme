@@ -440,11 +440,13 @@ def _supports_color():
 
 def _welcome_palette(color):
     if not color:
-        return {key: "" for key in ("accent", "bold", "dim", "border", "reset")}
+        return {key: "" for key in ("accent", "bold", "dim", "faint", "border", "reset")}
     return {
         "accent": "\033[38;5;209m",  # Claude 风格的暖橙色火花
         "bold": "\033[1m",
         "dim": "\033[38;5;245m",
+        # 思维链比答案正文更暗一档：它是过程不是结论，扫一眼知道"在动"就够了。
+        "faint": "\033[38;5;240m",
         "border": "\033[38;5;240m",
         "reset": "\033[0m",
     }
@@ -511,6 +513,24 @@ def _render_box(text, *, title=None, color=False, accent_border=False):
         rows.append(f"{line_border}│{reset} {plain}{' ' * pad} {line_border}│{reset}")
     rows.append(f"{line_border}╰{'─' * (box_width - 2)}╯{reset}")
     return "\n".join(rows)
+
+
+def _stream_rule(title=None, color=False):
+    """流式答案的开放式分节线。
+
+    为什么不用圆角框：框要在渲染时知道整段文本，才能逐行补右边的竖线——而流式
+    输出是一个字符一个字符到达的，先画框就等于先把答案攒完，那正是要消掉的等待。
+    所以流式那一段用「上下两条横线」把它框起来：同一套配色和标题位置，但不需要
+    预先知道内容。
+    """
+    pal = _welcome_palette(color)
+    border, reset, accent = pal["border"], pal["reset"], pal["accent"]
+    box_width = _box_width()
+    if not title:
+        return f"{border}{'─' * box_width}{reset}"
+    label = f"─ {title} "
+    dashes = max(0, box_width - _display_width(label))
+    return f"{border}─{accent}{label}{reset}{border}{'─' * dashes}{reset}"
 
 
 def build_welcome(agent, model, color=False):
@@ -583,7 +603,7 @@ def build_welcome(agent, model, color=False):
     return "\n".join(rows)
 
 
-def build_agent(args, on_token=None):
+def build_agent(args, on_token=None, on_reasoning=None):
     """根据 CLI 参数装配出一个可运行的 CodingForMe 实例。
 
     为什么存在：
@@ -621,6 +641,7 @@ def build_agent(args, on_token=None):
             secret_env_names=configured_secret_names,
             feature_flags={"delegate_tool": True},
             on_token=on_token,
+            on_reasoning=on_reasoning,
         )
     return CodingForMe(
         model_client=model,
@@ -635,6 +656,7 @@ def build_agent(args, on_token=None):
         # 这个能力有问题。
         feature_flags={"delegate_tool": True},
         on_token=on_token,
+        on_reasoning=on_reasoning,
     )
 
 
@@ -691,12 +713,34 @@ def main(argv=None):
     use_color = _supports_color()
     pal = _welcome_palette(use_color)
 
+    # 本轮 ask() 期间流式打印过的答案正文。用来判断最终答案要不要再渲染一遍：
+    # 已经完整流过的内容再进一次圆角框，屏幕上就是同一段话出现两次——实测就是
+    # 这个现象被报成「重新输出」。
+    streamed = []
+    # 思维链这一轮有没有起过头：只在第一条前面打一次标签。
+    thinking = []
+
     def on_token(text):
-        # 模型还在流式生成时的实时预览：用暗色打印，和后面 show() 渲染的
-        # 最终圆角框答案区分开，避免看起来像是同一段内容被打印了两遍。
+        if thinking:
+            # 正文开始了，思维链那段收尾，空一行分开。
+            thinking.clear()
+            print()
+        if not streamed:
+            print()
+            print(_stream_rule(answer_title, use_color))
+        streamed.append(text)
         print(f"{pal['dim']}{text}{pal['reset']}", end="", flush=True)
 
-    agent = build_agent(args, on_token=on_token)
+    def on_reasoning(text):
+        # 推理模型在吐第一个正文 token 之前会先推一批 reasoning_content（实测这个
+        # 后端要 4~5 秒）。不显示的话，用户在首 token 闸门之外还要再对着空屏幕等
+        # 这一段，而后端其实一直在推送。
+        if not thinking:
+            thinking.append(True)
+            print(f"\n{pal['faint']}{_terminal_safe('· 思考中 ')}", end="", flush=True)
+        print(f"{pal['faint']}{text}{pal['reset']}", end="", flush=True)
+
+    agent = build_agent(args, on_token=on_token, on_reasoning=on_reasoning)
 
     model = getattr(agent.model_client, "model", DEFAULT_OPENAI_MODEL)
     print(_terminal_safe(build_welcome(agent, model=model, color=use_color)))
@@ -709,12 +753,29 @@ def main(argv=None):
         print()
         print(_render_box(text, title=title or answer_title, color=use_color))
 
+    def respond(prompt):
+        """跑一轮 ask()，并决定最终答案要不要再渲染一遍圆角框。
+
+        判据是「这段答案是不是已经原样流式打印过」，而不是「这一轮有没有流过
+        东西」：中间轮次可能既带 tool_calls 又带正文，那时流出去的和最终答案
+        并不是同一段，按后者判会让真正的答案永远不出现。
+        """
+        streamed.clear()
+        thinking.clear()
+        answer = agent.ask(prompt)
+        if answer.strip() and "".join(streamed).rstrip().endswith(answer.rstrip()):
+            # 已经原样流式打印过，再进一次圆角框就是同一段话出现两次。
+            print()
+            print(_stream_rule(color=use_color))
+        else:
+            show(answer)
+
     if args.prompt:
         # one-shot 模式：只跑一次 ask，不进入 REPL 循环。
         prompt = " ".join(args.prompt).strip()
         if prompt:
             try:
-                show(agent.ask(prompt))
+                respond(prompt)
             except RuntimeError as exc:
                 print(str(exc), file=sys.stderr)
                 return 1
@@ -767,6 +828,6 @@ def main(argv=None):
             continue
 
         try:
-            show(agent.ask(user_input))
+            respond(user_input)
         except RuntimeError as exc:
             print(str(exc), file=sys.stderr)
