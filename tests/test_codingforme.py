@@ -2866,7 +2866,10 @@ def test_advice_still_names_the_tools_that_are_available(tmp_path):
     (tmp_path / "sub").mkdir()
     agent = build_agent(tmp_path, [])
 
-    assert "use write_file or patch_file instead of repeatedly listing files" in agent.prefix
+    # 阶段三之后这句建议住在 `list_files` 自己的描述里（见 runtime.PHASE3_TOOL_GUIDANCE），
+    # 而不是规则块里那条要按注册表现算的规则。它仍然要出现在 prefix 里——工具清单
+    # 也在 prefix 里，只是位置换了一层。
+    assert "instead of listing the tree first" in agent.prefix
     assert "Use list_files to see what is inside it." in agent.run_tool("read_file", {"path": "sub"})
     assert "Use list_files on '.' or search to find the right path" in agent.run_tool(
         "read_file", {"path": "nope.txt"}
@@ -2877,11 +2880,36 @@ def test_advice_still_names_the_tools_that_are_available(tmp_path):
 
 
 def test_a_registry_with_no_write_tools_drops_the_rule_instead_of_emptying_it(tmp_path):
-    """一条工具都不剩时整句删掉，而不是留一句指向空集的规则。"""
-    agent = _cut_registry(build_agent(tmp_path, []), {"read_file"})
+    """一条工具都不剩时整句删掉，而不是留一句指向空集的规则。
+
+    这条规则现在只在 `pre_phase3` 那一版提示词里还活着——阶段三把 per-tool 的用法
+    规则搬进了工具描述，规则块里不再有任何点名工具的句子。**代码路径还在**（那一版
+    仍然要渲染出正确的结果），所以这条断言跟着钉到那个变体上，而不是删掉。
+    """
+    agent = _cut_registry(
+        build_agent(tmp_path, [], prompt_variant="pre_phase3"), {"read_file"}
+    )
     assert "instead of repeatedly listing files" not in agent.prefix
     assert "Do not call read_file with args={}." in agent.prefix
     assert "__WRITE_RULE__" not in agent.prefix and "__REQUIRED_ARGS_RULE__" not in agent.prefix
+
+
+def test_per_tool_advice_disappears_with_the_tool_instead_of_being_recomputed(tmp_path):
+    """阶段三的结构性保证：建议跟着工具走，没有需要「记得现算」的东西。
+
+    对照上面那条：`pre_phase3` 靠 `build_prefix()` 现算才能不指向空集，而现在这句
+    话住在 `list_files` 的描述里——工具被裁掉，它自动消失。踩过的坑正是「忘了现算」
+    这一类（硬写的规则在只剩两三个工具的运行里仍然指着 write_file 说话）。
+    """
+    full = build_agent(tmp_path, [])
+    assert "instead of listing the tree first" in full.prefix
+
+    cut = _cut_registry(build_agent(tmp_path, []), {"read_file", "patch_file"})
+    assert "instead of listing the tree first" not in cut.prefix
+    # 规则块（Tools: 之前那一段）里现在一个工具名都没有，所以它跨任务逐字节相同。
+    rules_block = cut.prefix.split("Tools:")[0]
+    for name in ("list_files", "write_file", "patch_file", "read_file", "search", "run_shell"):
+        assert name not in rules_block, f"规则块仍然点名了 {name}"
 
 
 def test_the_context_window_is_resolved_through_four_layers_in_order():

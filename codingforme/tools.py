@@ -258,8 +258,20 @@ TOOL_EXAMPLES = {
 def build_tool_registry(agent):
     # 工具不是动态发现的，而是显式注册的。
     # 这样模型看到的是一个有边界、可审计的动作集合。
+    #
+    # 描述后面追加的那句话来自提示词变体（`runtime.PHASE3_TOOL_GUIDANCE`）。
+    # per-tool 的用法规则住在这里而不是全局规则块里，是阶段三的那条结构性改动：
+    # 工具不在注册表里，那段文字**结构上**就不存在了，不需要任何人记得去按
+    # `agent.tools` 现算——CLAUDE.md 里那条硬约束因此少了一个可违反的对象。
+    # 追加进 description 之后它同时进 `tool_signature()`、prefix 的工具清单和
+    # `to_openai_function_specs()` 的 JSON schema，三条通道自动一致。
+    guidance = dict(getattr(agent, "prompt_tool_guidance", None) or {})
     tools = {
-        name: {**spec, "run": partial(_TOOL_RUNNERS[name], agent)}
+        name: {
+            **spec,
+            "description": spec["description"] + guidance.get(name, ""),
+            "run": partial(_TOOL_RUNNERS[name], agent),
+        }
         for name, spec in BASE_TOOL_SPECS.items()
     }
     # 子 agent 是刻意做成受限能力的：一旦深度耗尽，

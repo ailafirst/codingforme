@@ -24,7 +24,14 @@ from ..run_store import RunStore
 from .code_signature import model_facing_code_signature, module_signatures
 from .. import context_manager
 from .. import tools as toolkit
-from ..runtime import DEFAULT_FEATURE_FLAGS, CodingForMe, SessionStore, prompt_template_signature
+from ..runtime import (
+    DEFAULT_FEATURE_FLAGS,
+    DEFAULT_PROMPT_VARIANT,
+    PROMPT_VARIANTS,
+    CodingForMe,
+    SessionStore,
+    prompt_template_signature,
+)
 from ..tools import base_tool_schema_signature
 from ..workspace import WorkspaceContext
 
@@ -68,6 +75,27 @@ class HarnessSpec:
     # `context_budget_breakdown` 仍然是探测出来的旧值，工件上两者会对不上。
     # 值会被 `models.resolve_context_window()` 向下取整到 `WINDOW_BUCKETS` 的档位。
     context_window: int = None
+    # 用哪一版提示词（见 runtime.PROMPT_VARIANTS）。这是阶段二补上的一条轴：
+    # 在它之前，提示词是模块级常量，改一句措辞只能让指纹换个值，**没有办法让
+    # 新旧两版进同一张对照表**——而记忆层、上下文层早就有这个能力。于是提示词
+    # 改动的验收一直退化成「这批跑批没变差」，实测信噪比低到读不出因果
+    # （15 个固定任务里能被措辞影响的只有 6 次适用判定，k=1 下 p=0.57）。
+    #
+    # 它同时进 `to_dict()`（因而进指纹）和 `code_signature()`（那份模板的哈希）。
+    # 两处都进是刻意的：前者让人一眼看出跑的是哪一臂，后者让「名字没变但文本被
+    # 改过」也能被指纹抓到。
+    prompt_variant: str = DEFAULT_PROMPT_VARIANT
+
+    def __post_init__(self):
+        # 名字不认识就在**构造期**炸，而不是等 agent 装配时。写错一个字母却静默
+        # 退回默认模板的话，整批跑批看起来跑了对照臂、实际两臂完全相同——那正是
+        # 这条轴要消灭的故障（探针失去作用对象时，它长得和「机制没问题」一样）。
+        if str(self.prompt_variant) not in PROMPT_VARIANTS:
+            known = ", ".join(sorted(PROMPT_VARIANTS))
+            raise ValueError(
+                f"harness {self.name!r} names an unknown prompt variant: "
+                f"{self.prompt_variant!r} (known: {known})"
+            )
 
     def resolved_feature_flags(self):
         flags = dict(DEFAULT_FEATURE_FLAGS)
@@ -122,7 +150,7 @@ class HarnessSpec:
         return "sha256:" + hashlib.sha256(
             json.dumps(
                 {
-                    "prompt_template": prompt_template_signature(),
+                    "prompt_template": prompt_template_signature(self.prompt_variant),
                     "tool_schema": base_tool_schema_signature(),
                     "model_facing_code": model_facing_code_signature(),
                 },
@@ -130,15 +158,15 @@ class HarnessSpec:
             ).encode("utf-8")
         ).hexdigest()
 
-    @staticmethod
-    def code_signature_parts():
+    def code_signature_parts(self):
         """签名的分项，用来回答「这次是哪一部分变了」。
 
         合并成一个哈希之后，"变了"和"哪里变了"就分开了；没有这个入口，事后
         只能靠 git 逐个模块比对。不进指纹，只进报告和排查。
         """
         parts = {
-            "prompt_template": prompt_template_signature(),
+            "prompt_variant": self.prompt_variant,
+            "prompt_template": prompt_template_signature(self.prompt_variant),
             "tool_schema": base_tool_schema_signature(),
         }
         parts.update(module_signatures())
@@ -199,6 +227,7 @@ class HarnessSpec:
             max_depth=int(self.max_depth),
             feature_flags=self.resolved_feature_flags(),
             on_token=on_token,
+            prompt_variant=self.prompt_variant,
             **agent_kwargs,
         )
 
@@ -374,6 +403,19 @@ BUILTIN_HARNESS_SPECS = {
             name="window_16k",
             description="上下文窗口降到 16k 档（预算 12,087 / 单条工具结果上限 1,510）",
             context_window=16_000,
+        ),
+        # ---- 提示词轴（阶段二）----
+        # 方向和 `no_*` 一致：把某个改动**退回去**，好让「改了到底有没有用」有
+        # 对照可跑。它退的不是一个 feature flag，而是整份提示词文本。
+        HarnessSpec(
+            name="prompt_pre_phase3",
+            description="提示词退回阶段三之前：per-tool 的用法规则还在全局规则块里，两条点名工具的规则随注册表现算",
+            prompt_variant="pre_phase3",
+        ),
+        HarnessSpec(
+            name="prompt_pre_phase1",
+            description="提示词退回阶段一之前的措辞：防重复按「同一组参数」判、工具调用禁令没有出口、记忆规则仍宣称只有前缀行才会被长期保存",
+            prompt_variant="pre_phase1",
         ),
         HarnessSpec(
             name="read_only",

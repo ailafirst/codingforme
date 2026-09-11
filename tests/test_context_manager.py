@@ -848,6 +848,31 @@ def _long_history(agent, turns=24, filler=90):
         agent.record({"role": "assistant", "content": f"acknowledged {index}: " + ("recap " * filler)})
 
 
+SQUEEZE_BUDGET_LADDER = (4823, 5000, 5200, 5400, 5600, 6000, 6500)
+
+
+def _budget_that_both_squeezes_and_drops(make_agent):
+    """在一小把候选预算里找一个**同时**压扁和丢弃都发生的档位。
+
+    为什么不写死一个数：压扁只在「剩下的额度刚好够塞一句 10 token 的残句」时发生，
+    而那条边界由 `total_budget - prefix - 其余段落` 决定——**prefix 长几十个 token，
+    边界就挪过去了**。写死的话，任何一次提示词改动都会让这条测试挂在「压扁数是 0」
+    上，而真正的机制一点没坏。这个坑这一轮踩了两次（`clear_at_least` 那条也是同一类），
+    所以这里改成扫一个梯子，并把选中的档位报出来。
+    """
+    for budget in SQUEEZE_BUDGET_LADDER:
+        agent = make_agent()
+        _, _, metadata = ContextManager(agent, total_budget=budget).build_all("next")
+        squeezed = metadata["history"]["squeezed_entry_count"]
+        dropped = metadata["sections"]["history"]["omitted_entry_count"]
+        if squeezed > 0 and dropped > 0:
+            return budget, metadata
+    raise AssertionError(
+        f"梯子上没有一个预算同时压扁又丢弃：{SQUEEZE_BUDGET_LADDER}——"
+        "要么保留循环坏了，要么这条负载已经顶不起预算了"
+    )
+
+
 def test_graded_compression_starts_before_the_prompt_is_over_budget(tmp_path):
     """触发点在 85%，不是 100%——压完还要留出余量。
 
@@ -1162,13 +1187,21 @@ def test_squeezed_entries_are_counted_apart_from_dropped_ones(tmp_path):
     两者对模型的后果差得很远:一个是「这一轮发生过、内容看不清」,一个是「这一轮
     根本不存在」。它们从前都只体现为 history 变短,谁也数不出各占多少。
     """
-    agent = build_agent(tmp_path, [])
-    # 关掉会话摘要:开着它,最早那批条目会被整体换成摘要,保留循环根本轮不到,
-    # 而这条测试要验的正是保留循环那两档(压扁 / 丢弃)分不分得开。
-    agent.feature_flags = {**agent.feature_flags, "session_summary": False}
-    _long_history(agent, turns=24, filler=200)
+    seq = [0]
 
-    _, _, metadata = ContextManager(agent, total_budget=4823).build_all("next")
+    def make_agent():
+        # 每个档位要一个干净的 agent：build_all() 会把摘要覆盖点这类状态写回 session。
+        seq[0] += 1
+        root = tmp_path / f"arm{seq[0]}"
+        root.mkdir()
+        agent = build_agent(root, [])
+        # 关掉会话摘要:开着它,最早那批条目会被整体换成摘要,保留循环根本轮不到,
+        # 而这条测试要验的正是保留循环那两档(压扁 / 丢弃)分不分得开。
+        agent.feature_flags = {**agent.feature_flags, "session_summary": False}
+        _long_history(agent, turns=24, filler=200)
+        return agent
+
+    _, metadata = _budget_that_both_squeezes_and_drops(make_agent)
 
     history = metadata["history"]
     assert "squeezed_entry_count" in history
@@ -1228,9 +1261,12 @@ def test_clear_at_least_leaves_headroom_when_it_is_the_only_thing_holding_the_li
             "graded_compression": False,
             "clear_at_least": clear_at_least,
         }
-        # 170 个词是特意挑的：它让 overflow（31）远小于预算的 1/10（300），
-        # 也就是 `max()` 里 `clear_at_least` 那一项说了算的唯一区间。
-        _history_with_tool_reads(agent, 12, " ".join(f"word{index}" for index in range(170)))
+        # 158 个词是特意挑的：它让 overflow（20）远小于预算的 1/10（300），
+        # 也就是 `max()` 里 `clear_at_least` 那一项说了算的唯一区间。这个常量是
+        # **对着当前 prefix 标定的**——prefix 长一点，同样的历史就会把 overflow
+        # 推到 300 以上，两臂随即压出同一个结果，测的就不再是这个机制了（提示词
+        # 加了 50 个 token 那次正是这么挂的）。改提示词后要重新标定，别改断言。
+        _history_with_tool_reads(agent, 12, " ".join(f"word{index}" for index in range(158)))
         return _reduction_targets(agent, 3000)
 
     _, on_meta, on_reductions = build(True)
@@ -1253,8 +1289,11 @@ def test_turning_reversible_squeeze_off_drops_the_entry_instead_of_stubbing_it(t
     关掉要**严格**退回这个机制出现之前的行为（直接丢弃），不是退回某个第三种形态，
     否则 A/B 测的就不是这个机制。
     """
-    def build(reversible_squeeze):
-        root = tmp_path / ("on" if reversible_squeeze else "off")
+    seq = [0]
+
+    def make_agent(reversible_squeeze=True):
+        seq[0] += 1
+        root = tmp_path / f"arm{seq[0]}"
         root.mkdir()
         agent = build_agent(root, [])
         agent.feature_flags = {
@@ -1263,7 +1302,15 @@ def test_turning_reversible_squeeze_off_drops_the_entry_instead_of_stubbing_it(t
             "reversible_squeeze": reversible_squeeze,
         }
         _long_history(agent, turns=24, filler=200)
-        _, prompt, metadata = ContextManager(agent, total_budget=4823).build_all("next")
+        return agent
+
+    # 先在开着的那一臂上找一个真的会压扁的预算——写死一个数的话，prefix 长度一变
+    # 这条消融就会在「压扁数是 0」上挂掉，而两臂其实都没坏。
+    budget, _ = _budget_that_both_squeezes_and_drops(make_agent)
+
+    def build(reversible_squeeze):
+        agent = make_agent(reversible_squeeze)
+        _, prompt, metadata = ContextManager(agent, total_budget=budget).build_all("next")
         return prompt, metadata
 
     on_prompt, on_meta = build(True)

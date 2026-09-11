@@ -509,7 +509,19 @@ def test_harness_fingerprint_covers_the_prompt_template(monkeypatch):
     而这个字段在结果 schema 里的定义正是「用来判定两次结果是否可比」。
     """
     base = get_harness("full").fingerprint()
-    monkeypatch.setattr(runtime, "PROMPT_TEMPLATE", runtime.PROMPT_TEMPLATE + "\n- One more rule.")
+    # 改的是**变体表里那一份**，不是模块级常量：阶段二之后签名从
+    # `PROMPT_VARIANTS[变体名]` 取，`PROMPT_TEMPLATE` 只是 "current" 那一格的
+    # 初值。改常量而不改表，等于改了一份没人读的文本。
+    monkeypatch.setattr(
+        runtime,
+        "PROMPT_VARIANTS",
+        {
+            **runtime.PROMPT_VARIANTS,
+            "current": runtime.PromptVariant(
+                runtime.PROMPT_TEMPLATE + "\n- One more rule.", runtime.PHASE3_TOOL_GUIDANCE
+            ),
+        },
+    )
 
     assert get_harness("full").fingerprint() != base
 
@@ -532,14 +544,38 @@ def test_harness_fingerprint_covers_the_tool_schema(monkeypatch):
 
 
 def test_code_signature_is_independent_of_configuration():
-    """代码签名只反映代码，不反映配置。
+    """代码签名只反映代码，不反映配置——**提示词变体除外，它选的就是不同的文本**。
 
     两者分开报，指纹变了的时候才能立刻回答「变的是配置还是代码」。
-    """
-    variants = [spec.code_signature() for spec in BUILTIN_HARNESS_SPECS.values()]
 
-    assert len(set(variants)) == 1, "不同配置变体的代码签名应当相同"
-    assert len({spec.fingerprint() for spec in BUILTIN_HARNESS_SPECS.values()}) == len(variants)
+    阶段二加了提示词轴之后，这条不变量要按变体分组说：同一版提示词下的所有配置
+    变体共用一个代码签名；不同版之间只允许 `prompt_template` 这一项不同。把它写
+    成「所有变体签名全都相同」的话，提示词轴就永远不会被指纹反映——那正是这条轴
+    存在之前的那个洞。
+    """
+    by_prompt = {}
+    for spec in BUILTIN_HARNESS_SPECS.values():
+        by_prompt.setdefault(spec.prompt_variant, set()).add(spec.code_signature())
+
+    for prompt_variant, signatures in by_prompt.items():
+        assert len(signatures) == 1, f"{prompt_variant} 下不同配置变体的代码签名应当相同"
+
+    assert len(by_prompt) > 1, "至少要有两版提示词，否则这条轴没有作用对象"
+    assert len({next(iter(sigs)) for sigs in by_prompt.values()}) == len(by_prompt), (
+        "两版提示词的代码签名必须不同"
+    )
+
+    parts = {
+        spec.prompt_variant: spec.code_signature_parts()
+        for spec in BUILTIN_HARNESS_SPECS.values()
+    }
+    left, right = (parts[name] for name in sorted(parts)[:2])
+    differing = {key for key in set(left) | set(right) if left.get(key) != right.get(key)}
+    assert differing == {"prompt_variant", "prompt_template"}, differing
+
+    assert len({spec.fingerprint() for spec in BUILTIN_HARNESS_SPECS.values()}) == len(
+        BUILTIN_HARNESS_SPECS
+    )
 
 
 def test_code_signature_covers_runtime_logic_not_just_text_constants(monkeypatch):

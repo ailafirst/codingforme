@@ -123,9 +123,123 @@ DEFAULT_FEATURE_FLAGS = {
 # Anthropic 官方那两个模板在这个后端上，短版 20/60 → 20/60（p=1.0000）、
 # 强版 20/60 → 25/60（p=0.4509），都不显著。runtime 两种都接，prompt 因此
 # 不需要也不应该对这件事表态。
+PROMPT_TEMPLATE_PRE_PHASE3 = textwrap.dedent(
+    """\
+    You are coding-for-me, a small local coding agent working inside a local repository.
+
+    Rules:
+    - Use tools instead of guessing about the workspace.
+    - Call tools through the provided function-calling interface; text that looks like a tool call is never executed, and neither is any other markup.
+    - You may write one short sentence before a tool call. If no available tool fits, say so plainly instead of improvising one.
+    - When you are done, reply with the answer as plain text and no tool call.
+    - Never invent tool results.
+    - Keep answers concise and concrete.
+    - If asked to remember/save/persist something so it survives future sessions, restate the fact as a line starting with exactly one of `Project convention:`, `Decision:`, `Dependency:`, `Preference:` (or 项目约定：/决策：/依赖：/偏好：). A line in that shape is stored as written; without one the fact has to be guessed out of your answer, and the guess is often wrong.
+    __WRITE_RULE__
+    - Before writing tests for existing code, read the implementation first.
+    - When writing tests, match the current implementation unless the user explicitly asked you to change the code.
+    - New files should be complete and runnable, including obvious imports.
+    - Content already shown above does not need to be fetched again: a repeat costs a full turn and returns what you can already see. Re-fetch a target only if it changed since, or if its result was cleared above.
+    __REQUIRED_ARGS_RULE__
+    - Every path argument is relative to the repo root below. Absolute paths and paths containing ".." are rejected.
+
+    Tools:
+    __TOOL_TEXT__
+
+    __WORKSPACE_TEXT__
+    """
+).strip()
+
+# 阶段三的模板。和上面那份（阶段一之后、阶段三之前）的区别只有一件事：
+# **点名工具的规则全部搬进了工具描述**，规则块因此不再有任何随注册表变化的内容。
+#
+# 为什么这么改，有三条依据，强度依次递减：
+#
+# 1. **它消灭的是一类 bug，不是调一个行为。**「凡是点名某个工具的文案都要按
+#    `agent.tools` 现算」是 CLAUDE.md 里的硬约束，它之所以要写成约束，正是因为
+#    踩过：任务白名单把注册表裁到只剩两三个工具，而硬写的规则仍然指着
+#    `write_file` 说话，模型照做只会拿回一句 `unknown tool`。写进工具描述之后，
+#    工具不在注册表里，那段文字**结构上**就不存在了——不需要任何人记得去现算。
+# 2. **官方自己是这么分的。** Claude Code v2.1.263 的 `# Tone and style` 只剩四条，
+#    全是输出格式；每个工具怎么用写在它自己的描述里（Read 约 700 字符、Bash 约
+#    1,800）。一段文字放哪一层，取决于它多久变一次、跟着谁变。
+# 3. **规则块从此跨任务逐字节相同。**实测（两个真实基准白名单
+#    `read_file+patch_file` vs `read_file+write_file+list_files`）：改之前两份
+#    system 消息的公共前缀停在第 8 条规则、只有 235 token（各自 516 / 544），
+#    卡住它的正是那条动态的写类工具规则。这条收益是真的但**很小**——同一个任务
+#    内部 system 消息本来就每轮相同，公共前缀只在**跨任务的第一轮**上兑现。
+#    别把它当成这次改动的主要理由。
+#
+# 代价要认账：搬进描述的文字会出现**两次**（prefix 的工具清单 + `tools=` 的 JSON
+# schema），而留在规则块里只出现一次。这和工具示例走两个通道是同一笔账——两份都
+# 进前缀缓存，边际成本接近零，但它不是零。
 PROMPT_TEMPLATE = textwrap.dedent(
     """\
     You are coding-for-me, a small local coding agent working inside a local repository.
+
+    Rules:
+    - Use tools instead of guessing about the workspace.
+    - Call tools through the provided function-calling interface; text that looks like a tool call is never executed, and neither is any other markup.
+    - You may write one short sentence before a tool call. If no available tool fits, say so plainly instead of improvising one.
+    - When you are done, reply with the answer as plain text and no tool call.
+    - Never invent tool results.
+    - Keep answers concise and concrete.
+    - If asked to remember/save/persist something so it survives future sessions, restate the fact as a line starting with exactly one of `Project convention:`, `Decision:`, `Dependency:`, `Preference:` (or 项目约定：/决策：/依赖：/偏好：). A line in that shape is stored as written; without one the fact has to be guessed out of your answer, and the guess is often wrong.
+    - Before writing tests for existing code, read the implementation first.
+    - When writing tests, match the current implementation unless the user explicitly asked you to change the code.
+    - New files should be complete and runnable, including obvious imports.
+    - Every argument the schema marks as required must be provided; never call a tool with an empty argument object.
+    - Every path argument is relative to the repo root below. Absolute paths and paths containing ".." are rejected.
+
+    Tools:
+    __TOOL_TEXT__
+
+    __WORKSPACE_TEXT__
+    """
+).strip()
+
+# 搬进工具描述的那几句。键是工具名，值直接追加在 `BASE_TOOL_SPECS[...]["description"]`
+# 后面（见 tools.build_tool_registry），因此**同时**出现在 prefix 的工具清单和
+# `tools=` 的 JSON schema 里——两个通道喂给模型的解析路径不同，和工具示例同一笔账。
+#
+# 三句的来历各不相同，都不是新写的规矩：
+# - read_file 那句是阶段一加进规则块的防重复措辞，原样搬过来（它本来就只讲 read_file）。
+# - list_files 那句是原来那条动态的写类工具规则的反面。挂在 list_files 而不是
+#   write_file/patch_file 上有两个好处：**只写一份**（挂在写类工具上要写两份），
+#   而且它讲的本来就是「别反复列目录」——被过度使用的是这个工具。注册表里没有
+#   list_files 时这句话跟着消失，正好也是对的。
+#
+# 刻意**只搬不加**：`patch_file` 的 old_text 必须逐字节命中（实测被打回的调用里
+# 它占 14%）也值得写一句，但那是新增内容，混进来的话这一臂就同时变了两件事，
+# 「搬家本身有没有代价」就测不出来了。留给下一轮单独做。
+PHASE3_TOOL_GUIDANCE = {
+    "read_file": (
+        " Content you already read stays in the conversation above: reading it again costs a full "
+        "turn and returns what you can already see. Read it again only if it changed since, or if "
+        "its result was cleared from the context."
+    ),
+    "list_files": (
+        " If the user already named the file and the path is clear, edit or read it directly "
+        "instead of listing the tree first."
+    ),
+}
+
+# ---- 提示词变体（阶段二）----
+#
+# 为什么需要它：`PROMPT_TEMPLATE` 从前是模块级常量，改它只让
+# `prompt_template_signature()` 换一个值，两批跑批从此不可比——**却没有任何办法
+# 在一次对比里同时跑两版提示词**。记忆层和上下文层早就有这个能力（no_memory /
+# no_cjk_recall / no_tool_output_spill …），提示词层没有，于是措辞改动的验收只能
+# 退化成「这批跑批没变差」。实测这个退化有多严重：15 个固定任务里能被措辞影响的
+# 只有 6 次适用判定（`no_redundant_reread`），k=1 下 4/6 → 2/6，Fisher 精确检验
+# p=0.57，读不出任何因果。
+#
+# 变体存的是**整份模板**，不是「在当前模板上打几个补丁」。补丁式会让对照组跟着
+# 当前模板一起漂移：下次再改一句措辞，对照臂也跟着变，A/B 测的就不再是同一件事。
+# 代价是两份文本里有大段重复，由 `tests/test_prompt_variants.py` 锁住它们的
+# 占位符集合一致（少一个占位符，那一臂的动态规则会**整句消失**而不报错）。
+PROMPT_TEMPLATE_PRE_PHASE1 = textwrap.dedent(
+    """    You are coding-for-me, a small local coding agent working inside a local repository.
 
     Rules:
     - Use tools instead of guessing about the workspace.
@@ -150,6 +264,61 @@ PROMPT_TEMPLATE = textwrap.dedent(
     """
 ).strip()
 
+DEFAULT_PROMPT_VARIANT = "current"
+
+
+@dataclass(frozen=True)
+class PromptVariant:
+    """一版提示词：模板 + 各工具描述后面追加的那句话。
+
+    阶段三之后一版提示词不再只是一段模板文本——per-tool 的用法规则搬进了工具
+    描述，而那也是提示词的一部分。两者必须**捆在一起**换：只换模板不换描述，
+    对照臂会同时带着旧规则块和新工具描述，同一条建议出现两遍，测的就不是任何
+    一版真实存在过的提示词。
+    """
+
+    template: str
+    tool_guidance: dict = None
+
+    def guidance_for(self, name):
+        return (self.tool_guidance or {}).get(str(name), "")
+
+
+PROMPT_VARIANTS = {
+    DEFAULT_PROMPT_VARIANT: PromptVariant(PROMPT_TEMPLATE, PHASE3_TOOL_GUIDANCE),
+    # 阶段三**之前**那一版：per-tool 规则还在规则块里，两条规则随注册表现算。
+    "pre_phase3": PromptVariant(PROMPT_TEMPLATE_PRE_PHASE3, {}),
+    # 阶段一改措辞**之前**的那一版。留着它不是为了随时能退回去，而是为了让
+    # 「改了措辞到底有没有用」变成一个能跑出对照的问题：同一份数据集、同一个
+    # 模型、只换这一个名字。
+    "pre_phase1": PromptVariant(PROMPT_TEMPLATE_PRE_PHASE1, {}),
+}
+
+
+def get_prompt_variant(variant=None):
+    """按名字取一版提示词。名字不认识就报错，不静默退回默认值。
+
+    静默退回的后果是整批跑批**看起来跑了对照臂、实际两臂完全相同**——而那正是
+    这套变体机制要消灭的那种故障（探针失去作用对象时，它长得和「机制没问题」
+    一模一样）。
+    """
+    name = str(variant or DEFAULT_PROMPT_VARIANT)
+    try:
+        return PROMPT_VARIANTS[name]
+    except KeyError:
+        known = ", ".join(sorted(PROMPT_VARIANTS))
+        raise ValueError(f"unknown prompt variant: {variant!r} (known: {known})") from None
+
+
+def get_prompt_template(variant=None):
+    """那一版的模板文本。"""
+    return get_prompt_variant(variant).template
+
+
+def get_tool_guidance(variant=None):
+    """那一版追加在工具描述后面的话（工具名 -> 一句话）。"""
+    return dict(get_prompt_variant(variant).tool_guidance or {})
+
 
 def _english_list(names):
     """把工具名拼成 `a`、`a or b`、`a, b, or c`，用于 prompt 里点名工具的规则句。"""
@@ -161,7 +330,7 @@ def _english_list(names):
     return ", ".join(names[:-1]) + f", or {names[-1]}"
 
 
-def prompt_template_signature():
+def prompt_template_signature(variant=None):
     """稳定前缀模板的 sha256。
 
     存在的理由：`HarnessSpec.fingerprint()` 只吃配置字段，而**提示词文本不是
@@ -169,7 +338,18 @@ def prompt_template_signature():
     提示词改过四轮、协议改过一轮，指纹一次没变——而那个字段在结果 schema 里的
     定义正是「用来判定两次结果是否可比」。
     """
-    return hashlib.sha256(PROMPT_TEMPLATE.encode("utf-8")).hexdigest()
+    # 覆盖的是**整版提示词**，不只是模板：阶段三之后 per-tool 规则住在工具描述
+    # 附文里，只哈希模板的话，两版只差附文时会算出同一个签名——而那个字段的定义
+    # 正是「用来判定两次结果是否可比」。
+    payload = json.dumps(
+        {
+            "template": get_prompt_template(variant),
+            "tool_guidance": get_tool_guidance(variant),
+        },
+        sort_keys=True,
+        ensure_ascii=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 CHECKPOINT_SCHEMA_VERSION = "phase1-v1"
@@ -325,15 +505,24 @@ class CodingForMe:
         secret_env_names=None,
         feature_flags=None,
         on_token=None,
+        on_reasoning=None,
         # 上下文窗口（token）。None 表示自动解析：已知后端表 → litellm 注册表 →
         # 保守默认值，解析结果向下取整到档位。见 models.resolve_context_window()。
         context_window=None,
+        # 用哪一版提示词模板（见 PROMPT_VARIANTS）。它是 harness 的一个维度，
+        # 不是运行时开关：`HarnessSpec.prompt_variant` 把它接进指纹与消融体系，
+        # 这样「换了措辞」才和「关掉记忆」一样能跑出对照。
+        prompt_variant=None,
     ):
         self.model_client = model_client
         # 可选的流式回调：传入时 model_client.complete() 会走 SSE 流式，
         # 每个文本增量都会实时回调给它（比如 REPL 想要边生成边显示）。
         # 不传（默认）时行为和之前完全一样，一次性拿完整结果。
         self.on_token = on_token
+        # 同上，但收的是**思维链**增量。分开两个回调而不是给 on_token 加一个
+        # kind 参数：既有调用方（含测试）传的是单参回调，加参数会全部炸掉，
+        # 而思维链和答案正文在 UI 上本来就该长得不一样。
+        self.on_reasoning = on_reasoning
         self.workspace = workspace
         self.root = Path(workspace.repo_root)
         self.session_store = session_store
@@ -365,6 +554,12 @@ class CodingForMe:
             memory_types=self.feature_enabled("memory_types"),
         )
         self.session["memory"] = self.memory.to_dict()
+        # 提示词变体要在 build_tools() **之前**定下来：阶段三之后 per-tool 的用法
+        # 规则住在工具描述里，而描述是在建注册表那一刻拼好的。名字不认识在这里
+        # 就报错，不等跑批跑完才发现两臂用的是同一份文本。
+        self.prompt_variant = str(prompt_variant or DEFAULT_PROMPT_VARIANT)
+        self.prompt_tool_guidance = get_tool_guidance(self.prompt_variant)
+        self.prompt_template = get_prompt_template(self.prompt_variant)
         self.tools = self.build_tools()
         # 装配方声明的工具白名单，仅供工件记录用；真正的裁剪由装配方直接改
         # `self.tools` 完成（见 eval/harness.py 的 HarnessSpec.build）。两者
@@ -739,7 +934,7 @@ class CodingForMe:
             else ""
         )
         text = (
-            PROMPT_TEMPLATE
+            self.prompt_template
             .replace("__TOOL_TEXT__", tool_text)
             .replace("__WRITE_RULE__\n", write_rule)
             .replace("__REQUIRED_ARGS_RULE__\n", required_args_rule)
@@ -1248,6 +1443,11 @@ class CodingForMe:
                 "prompt_cache_key": self.prefix_state.hash,
                 "workspace_fingerprint": self.prefix_state.workspace_fingerprint,
                 "tool_signature": self.prefix_state.tool_signature,
+                # 这一轮用的是哪一版提示词。两个字段都要留：名字是给人读的（报告
+                # 里按它分组），签名是给机器判的（名字相同但文本被改过时，只有
+                # 签名对得上才说明两批数据真的可比）。
+                "prompt_variant": self.prompt_variant,
+                "prompt_template_signature": prompt_template_signature(self.prompt_variant),
                 "workspace_changed": refresh["workspace_changed"],
                 "prefix_changed": refresh["prefix_changed"],
                 "prompt_cache_supported": bool(getattr(self.model_client, "supports_prompt_cache", False)),
@@ -1894,6 +2094,7 @@ class CodingForMe:
                 prompt_cache_retention=prompt_cache_retention,
                 tools=toolkit.to_openai_function_specs(self.tools) if self.native_tool_calls else None,
                 on_token=self.on_token,
+                on_reasoning=self.on_reasoning,
             )
             completion_metadata = dict(getattr(self.model_client, "last_completion_metadata", {}) or {})
             if completion_metadata:
